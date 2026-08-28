@@ -104,7 +104,9 @@ s = ' '.join(args)
 m = re.search(r'--effort\s+(\S+)', s)
 print(m.group(1) if m else 'medium')
 " 2>/dev/null)
-    # Advisor tool: Sonnet-tier agents get an Opus advisor; everyone else keeps it off (BJ policy 2026-06-30)
+    # Advisor tool: cheaper-tier agents get an Opus advisor to consult; agents
+    # already running a top-tier model do not need one and it is off for them.
+    # Drop this block if you want the advisor everywhere, or nowhere.
     local agent_model
     agent_model=$("$FLEET_PYTHON" -c "
 import json, re

@@ -1,5 +1,5 @@
---- /Users/ops/.claude/plugins/marketplaces/claude-plugins-official/external_plugins/discord/server.ts	2026-04-01 00:59:29.000000000 -0600
-+++ /Users/ops/.claude/plugins/cache/claude-plugins-official/discord/0.0.4/server.ts	2026-03-29 12:03:54.000000000 -0600
+--- a/server.ts
++++ b/server.ts
 @@ -100,11 +100,15 @@
  type GroupPolicy = {
    requireMention: boolean

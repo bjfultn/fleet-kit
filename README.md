@@ -55,7 +55,16 @@ happens, which is the worst part: the fleet looks healthy and simply never
 talks to itself.
 
 `patches/discord-allowbots.patch` adds an `allowBots` allowlist. Apply it to
-the plugin's cached `server.ts`.
+the plugin's cached `server.ts`:
+
+```sh
+cd ~/.claude/plugins/cache/claude-plugins-official/discord/<version>
+patch -p1 < <fleet-kit>/patches/discord-allowbots.patch
+```
+
+It applies with line offsets against neighbouring plugin versions, which is
+expected. If a hunk fails outright, the plugin has moved the message handler
+and the patch needs regenerating against that version.
 
 The cache is not versioned, so **a plugin update silently reverts this**. After
 any plugin upgrade, re-apply the patch and confirm agent-to-agent mentions

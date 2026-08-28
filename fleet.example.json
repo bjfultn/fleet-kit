@@ -2,7 +2,7 @@
   "_comment": "Fleet-level settings. Copy to fleet.json and edit. Anything not set here falls back to the defaults shown in docs/ARCHITECTURE.md.",
 
   "tmux_session": "agents",
-  "timezone": "America/Denver",
+  "timezone": "UTC",
 
   "general_channel_id": "000000000000000000",
 
