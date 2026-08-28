@@ -1,0 +1,62 @@
+--- /Users/ops/.claude/plugins/marketplaces/claude-plugins-official/external_plugins/discord/server.ts	2026-04-01 00:59:29.000000000 -0600
++++ /Users/ops/.claude/plugins/cache/claude-plugins-official/discord/0.0.4/server.ts	2026-03-29 12:03:54.000000000 -0600
+@@ -100,11 +100,15 @@
+ type GroupPolicy = {
+   requireMention: boolean
+   allowFrom: string[]
++  /** When true, allowed bot messages in this channel skip the mention requirement. */
++  freeBotChat?: boolean
+ }
+ 
+ type Access = {
+   dmPolicy: 'pairing' | 'allowlist' | 'disabled'
+   allowFrom: string[]
++  /** Bot user IDs whose messages should be delivered instead of dropped. */
++  allowBots?: string[]
+   /** Keyed on channel ID (snowflake), not guild ID. One entry per guild channel. */
+   groups: Record<string, GroupPolicy>
+   pending: Record<string, PendingEntry>
+@@ -155,6 +159,7 @@
+     return {
+       dmPolicy: parsed.dmPolicy ?? 'pairing',
+       allowFrom: parsed.allowFrom ?? [],
++      allowBots: parsed.allowBots,
+       groups: parsed.groups ?? {},
+       pending: parsed.pending ?? {},
+       mentionPatterns: parsed.mentionPatterns,
+@@ -285,7 +290,10 @@
+   if (groupAllowFrom.length > 0 && !groupAllowFrom.includes(senderId)) {
+     return { action: 'drop' }
+   }
+-  if (requireMention && !(await isMentioned(msg, access.mentionPatterns))) {
++  // Bot messages require mention unless the channel has freeBotChat enabled
++  const botNeedsMention = msg.author.bot && (msg as any)._forceMention && !policy.freeBotChat
++  const mustMention = requireMention || botNeedsMention
++  if (mustMention && !(await isMentioned(msg, access.mentionPatterns))) {
+     return { action: 'drop' }
+   }
+   return { action: 'deliver', access }
+@@ -293,6 +301,7 @@
+ 
+ async function isMentioned(msg: Message, extraPatterns?: string[]): Promise<boolean> {
+   if (client.user && msg.mentions.has(client.user)) return true
++  if (msg.mentions.everyone) return true
+ 
+   // Reply to one of our messages counts as an implicit mention.
+   const refId = msg.reference?.messageId
+@@ -800,7 +809,14 @@
+ })
+ 
+ client.on('messageCreate', msg => {
+-  if (msg.author.bot) return
++  if (msg.author.bot) {
++    // Allow specific bots listed in access.json (for agent-to-agent comms).
++    // Bot messages always require a mention — set a flag so gate() enforces it
++    // even when the channel has requireMention: false.
++    const access = loadAccess()
++    if (!access.allowBots?.includes(msg.author.id)) return
++    ;(msg as any)._forceMention = true
++  }
+   handleInbound(msg).catch(e => process.stderr.write(`discord: handleInbound failed: ${e}\n`))
+ })
+ 

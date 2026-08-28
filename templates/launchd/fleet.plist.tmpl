@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>{{LABEL}}</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>{{FLEET_ROOT}}/bin/fleet-start.sh</string>
+    </array>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>FLEET_ROOT</key>
+        <string>{{FLEET_ROOT}}</string>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <!-- KeepAlive must stay false. fleet-start.sh runs once and exits; the
+         agents it launched keep running under tmux. With KeepAlive true,
+         launchd would treat that normal exit as a crash and restart the whole
+         fleet in a loop. -->
+    <key>KeepAlive</key>
+    <false/>
+
+    <!-- The tmux server and the watcher outlive this script. Without this,
+         launchd reaps the whole process group when the script exits and the
+         fleet dies seconds after starting. -->
+    <key>AbandonProcessGroup</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>{{LOG_DIR}}/fleet-start.log</string>
+    <key>StandardErrorPath</key>
+    <string>{{LOG_DIR}}/fleet-start.log</string>
+</dict>
+</plist>

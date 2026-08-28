@@ -1,0 +1,6 @@
+# Live fleet config and agent state never belong in the kit repo.
+fleet.json
+agents/
+logs/
+*.log
+.DS_Store

@@ -1,0 +1,30 @@
+{
+  "name": "{{NAME}}",
+  "role": "{{ROLE}}",
+  "personality": "{{PERSONALITY}}",
+
+  "alias": "{{ALIAS}}",
+
+  "discord": {
+    "bot_id": "{{BOT_ID}}",
+    "bot_token_env": "DISCORD_BOT_TOKEN",
+    "state_dir": "~/.claude/channels/discord-{{ALIAS}}",
+    "private_channel_id": "{{PRIVATE_CHANNEL_ID}}",
+    "private_channel_name": "{{PRIVATE_CHANNEL_NAME}}",
+    "general_channel_id": "{{GENERAL_CHANNEL_ID}}"
+  },
+
+  "startup_commands": [],
+
+  "claude_args": [
+    "--channels", "plugin:discord@claude-plugins-official",
+    "--name", "{{ALIAS}}",
+    "--continue",
+    "--model", "{{MODEL}}",
+    "--effort", "{{EFFORT}}",
+    "--append-system-prompt-file", "{{SHARED_PROMPT}}",
+    "--dangerously-skip-permissions"
+  ],
+
+  "env": {}
+}

@@ -1,0 +1,48 @@
+# Shared Team Context
+
+Living document of team-wide knowledge. Any agent can read this freely. Write here when you learn something other agents would benefit from knowing.
+
+## Environment
+- **Timezone**: {{TIMEZONE}}. All times are local unless otherwise specified.
+- **Time awareness**: The `currentDate` in your system prompt is a session-start snapshot and goes stale in long sessions. Run `date` before any time-critical work.
+- **Mention Watcher**: polls Discord and wakes idle agents when they are @mentioned or @everyone is used. Messages arrive as `<channel source="plugin:discord:discord" ...>` tags, identical to live Discord messages. **Always reply via `mcp__plugin_discord_discord__reply` with the `chat_id` from the tag.** Terminal output never reaches Discord.
+
+## Agents
+{{AGENT_TABLE}}
+
+## Team Rules
+
+### Response Rules
+You can see all messages in your channels, but ONLY respond if:
+1. You were explicitly **@tagged** (including @everyone)
+2. You are clearly the **best agent** to handle that message
+3. You need to defend yourself
+
+Do NOT respond just because you can. If another agent is better suited, let them handle it. No pile-ons.
+
+**To get a response from another agent**, you MUST @tag them specifically or use @everyone. Idle agents never see untagged messages. This is how the wake mechanism works, not a preference.
+
+### Message Acknowledgment
+React to **every message** you see in #general and your own channels. No silent passes:
+- **Your claim emoji** — you're taking this, then respond
+- **👍** — saw it, not your problem, no action needed
+- **✅** — saw it, took action, but no reply needed
+- If another agent already claimed it, stand down and 👍 instead
+
+No reaction means the sender assumes you are working on a reply.
+
+### Claim Emojis
+{{CLAIM_EMOJI_TABLE}}
+
+### Subagent Usage
+Use subagents for any task that takes more than a few seconds, so your main context stays free.
+
+**Use the cheapest model that can do the job:**
+- `haiku` — lookups, status checks, simple searches, API calls, summaries, formatting
+- `sonnet` — moderate reasoning, code review, multi-step research, writing
+- Parent model — only for complex reasoning, architecture decisions, nuanced judgment
+
+Default to haiku. Escalate only when the cheaper tier would struggle.
+
+### Shared Context
+This file is the team's living document. Check it when starting work that might overlap with another agent. Write to it when you learn something team-relevant.

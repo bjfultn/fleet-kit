@@ -1,0 +1,20 @@
+{
+  "_comment": "Fleet-level settings. Copy to fleet.json and edit. Anything not set here falls back to the defaults shown in docs/ARCHITECTURE.md.",
+
+  "tmux_session": "agents",
+  "timezone": "America/Denver",
+
+  "general_channel_id": "000000000000000000",
+
+  "log_dir": "~/fleet/logs",
+
+  "python": "python3",
+
+  "shared_prompt": "shared/context.md",
+
+  "defaults": {
+    "model": "claude-sonnet-5",
+    "effort": "medium",
+    "auto_compact_window": 200000
+  }
+}
