@@ -39,12 +39,44 @@ to the parent of `bin/`, so a plain checkout works with nothing exported. Set
 
 ## Setup
 
-1. `cp fleet.example.json fleet.json` and edit it.
-2. Create one Discord bot application per agent. docs/DISCORD-SETUP.md walks
-   through it, including the intents that must be on.
-3. Create an agent directory per agent from `templates/agent/`.
-4. Apply the Discord plugin patch (below).
-5. `bin/fleet-start.sh`
+Create one Discord bot application per agent first. docs/DISCORD-SETUP.md walks
+through it, including the intents that must be on and the two IDs you need to
+have handy per agent: the Application ID and its private channel ID.
+
+Then:
+
+```sh
+./setup.sh
+```
+
+It checks prerequisites, asks for fleet settings and each agent, and writes
+`fleet.json`, `shared/context.md`, and an `agents/<alias>/` directory per agent
+containing `config.json`, `CLAUDE.md`, `access.json`, and an empty memory index.
+On macOS it also writes a launchd plist for boot.
+
+Bot tokens are prompted for last, do not echo, and are written straight to each
+agent's state directory at mode 0600. They are deliberately not accepted from a
+spec file: a token in a JSON file is a token in a backup and eventually in a
+paste.
+
+Then apply the Discord plugin patch (below) and run `bin/fleet-start.sh`.
+
+Other modes:
+
+```sh
+./setup.sh --dry-run              # render everything, write nothing
+./setup.sh --spec answers.json    # non-interactive; tokens still prompted for
+./setup.sh --root /path/to/fleet  # provision somewhere other than this checkout
+```
+
+`--spec` takes the same keys the prompts ask for, plus an `agents` array. Every
+agent is validated before anything is written, so a typo in a bot ID fails with
+a message naming the agent rather than provisioning a fleet member that quietly
+can never be woken.
+
+Editing an existing fleet is a text edit, not a rerun: change the files under
+`agents/` and restart that agent. Rerunning `setup.sh` against a populated root
+overwrites configs and personas.
 
 ## The Discord plugin patch is required
 
