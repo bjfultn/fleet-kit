@@ -172,6 +172,41 @@ def agent_state_dir(agent: dict) -> Path:
         agent.get("state_dir") or f"~/.claude/channels/discord-{agent['alias']}"))
 
 
+FLEET_KEYS = {"tmux_session", "timezone", "general_channel_id",
+              "owner_user_id", "log_dir", "agents"}
+AGENT_KEYS = {"name", "alias", "role", "personality", "responsibilities",
+              "lane", "claim_emoji", "bot_id", "private_channel_id",
+              "private_channel_name", "model", "effort", "state_dir"}
+
+
+def validate_spec_keys(spec: dict) -> None:
+    """Reject spec keys nothing reads.
+
+    Unknown keys used to be ignored in silence, so a spec asking for something
+    the tool does not support provisioned a fleet that did not match it and
+    exited 0. A "fleet_root" that nothing honours put a whole test fleet inside
+    the kit checkout while the run reported success. The root comes from --root;
+    everything else is here. Guessing at a key name should be an error, not a
+    surprise later.
+    """
+    problems = []
+    for k in sorted(set(spec) - FLEET_KEYS):
+        problems.append(f"unknown key {k!r} (the fleet root is set with --root)"
+                        if k in ("fleet_root", "root")
+                        else f"unknown key {k!r}")
+    for a in spec.get("agents", []):
+        if not isinstance(a, dict):
+            problems.append(f"agents entries must be objects, got {type(a).__name__}")
+            continue
+        who = a.get("name") or a.get("alias") or "?"
+        for k in sorted(set(a) - AGENT_KEYS):
+            problems.append(f"{who}: unknown agent key {k!r}")
+    if problems:
+        for m in problems:
+            warn(m)
+        die("spec file has keys this tool does not read; fix or remove them")
+
+
 def validate_agents(agents: list[dict]) -> None:
     """Check every agent record, whichever mode produced it.
 
@@ -335,6 +370,8 @@ def main() -> int:
         say()
 
     spec = json.loads(args.spec.read_text()) if args.spec else None
+    if spec is not None:
+        validate_spec_keys(spec)
     ans = Answers(spec)
 
     root: Path = args.root.resolve()
@@ -406,8 +443,6 @@ def main() -> int:
              "LANE": a.get("lane") or a.get("role") or "not set",
              "MEMORY_DIR": str(adir / "memory")}))
 
-        writer.write(adir / "access.json",
-                     build_access(a, agents, owner_id, general_id))
         writer.mkdir(adir / "memory")
         writer.write(adir / "memory" / "MEMORY.md",
                      f"# {a['name']}'s memory index\n\nOne line per memory:\n"
@@ -416,6 +451,15 @@ def main() -> int:
         # State dir is 0700 and the token file 0600: it holds a credential that
         # can post as this agent anywhere the bot is invited.
         writer.mkdir(state_dir, 0o700)
+
+        # access.json belongs NEXT TO the token, in the state dir the plugin is
+        # pointed at by DISCORD_STATE_DIR. It used to be written into the agent
+        # directory, where it looks right to a human reading the repo and is
+        # read by nothing: the plugin falls back to an empty allowlist, and the
+        # agent starts, gets woken by a mention, and then refuses to reply with
+        # "channel is not allowlisted". Verified on a cold start 2026-08-28.
+        writer.write(state_dir / "access.json",
+                     build_access(a, agents, owner_id, general_id))
 
     # ── tokens ──────────────────────────────────────────────────────────────
     # Deliberately never read from a spec file. A token in a JSON file on disk

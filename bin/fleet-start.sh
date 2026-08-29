@@ -44,7 +44,25 @@ if [ -z "$watcher_token" ]; then
     exit 1
 fi
 
-pkill -f "mention-watcher.py" 2>/dev/null
+# Stop only THIS fleet's watcher, tracked by pidfile.
+#
+# This was `pkill -f "mention-watcher.py"`, which matches on the filename and
+# therefore kills every watcher on the box regardless of which fleet it serves.
+# Starting a second fleet silently took down the first one's waker: agents stay
+# up and look healthy, and simply stop being wakeable by mention. Verified the
+# hard way on 2026-08-28, when a test fleet knocked out the live one for ~30s.
+# Match on identity, never on a name that another fleet also has.
+pidfile="$FLEET_LOG_DIR/mention-watcher.pid"
+if [ -f "$pidfile" ]; then
+    old_pid=$(cat "$pidfile" 2>/dev/null || true)
+    # Confirm the pid is still OUR watcher before signalling it. Pids get
+    # recycled, and killing a stranger is worse than leaving a stale file.
+    if [ -n "${old_pid:-}" ] && ps -p "$old_pid" -o command= 2>/dev/null | grep -q "mention-watcher.py"; then
+        kill "$old_pid" 2>/dev/null || true
+    fi
+    rm -f "$pidfile"
+fi
+
 # ENFORCE=1 drops wakes from authors outside the agent's own access.json.
 # 0 logs "WOULD DROP" only. Start at 0, read the log, then flip.
 MENTION_WATCHER_ENFORCE="${MENTION_WATCHER_ENFORCE:-0}" \
@@ -52,6 +70,7 @@ FLEET_ROOT="$FLEET_ROOT" \
 DISCORD_BOT_TOKEN="$watcher_token" \
     "$FLEET_PYTHON" "$(dirname "${BASH_SOURCE[0]}")/mention-watcher.py" \
     >> "$FLEET_LOG_DIR/mention-watcher.log" 2>&1 &
+echo $! > "$pidfile"
 unset watcher_token
 
 # ── Agents ──────────────────────────────────────────────────────────────────

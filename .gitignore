@@ -1,6 +1,12 @@
-# Live fleet config and agent state never belong in the kit repo.
+# A provisioned fleet lives in the same directory as the kit by default, so the
+# things setup.sh generates sit right next to the things it ships. Everything
+# below is generated, machine-specific, or both.
 fleet.json
 agents/
+shared/
 logs/
 *.log
+com.fleet.*.plist
+__pycache__/
+*.pyc
 .DS_Store

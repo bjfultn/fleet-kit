@@ -83,6 +83,36 @@ start_agent() {
     local args
     args=$(get_agent_args "$agent_dir")
 
+    # Drop --continue when this working directory has no prior conversation.
+    #
+    # `claude --continue` with nothing to continue prints "No conversation found
+    # to continue" and EXITS. Interactively that leaves a dead tmux window
+    # sitting at a shell prompt, which is exactly what a brand-new fleet hits on
+    # its first start: every agent dies on launch and the fleet looks like it
+    # came up. An earlier check cleared --continue by probing it under --print,
+    # which does not behave this way. Test the mode you actually ship.
+    #
+    # --continue is right for every restart after the first, so it stays in the
+    # config and gets stripped per launch instead. Claude Code keeps transcripts
+    # in ~/.claude/projects/<key>, where the key is the RESOLVED working
+    # directory with every character outside [A-Za-z0-9-] replaced by a dash,
+    # truncated at 200 characters with a hash appended.
+    if [[ "$args" == *--continue* ]]; then
+        local real_workdir proj_key proj_dir
+        real_workdir=$(cd "$workdir" 2>/dev/null && pwd -P) || real_workdir="$workdir"
+        proj_key=$(printf '%s' "$real_workdir" | LC_ALL=C sed 's/[^A-Za-z0-9-]/-/g')
+        proj_dir="$HOME/.claude/projects/${proj_key:0:200}"
+        if [ ${#proj_key} -gt 200 ]; then
+            # Past the cap the name carries a hash we cannot recompute, so match
+            # on the prefix instead of guessing the whole thing.
+            proj_dir=$(ls -d "$HOME/.claude/projects/${proj_key:0:200}"* 2>/dev/null | head -1)
+        fi
+        if [ -z "$proj_dir" ] || ! compgen -G "$proj_dir/*.jsonl" >/dev/null 2>&1; then
+            echo "  No prior conversation in $workdir - starting fresh"
+            args=$(echo "$args" | sed 's/--continue//')
+        fi
+    fi
+
     ensure_tmux_session
 
     # Check if window already exists
