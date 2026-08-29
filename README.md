@@ -116,11 +116,16 @@ report.
 
 ## What this does not include
 
-No dashboard. Visibility is tmux and the log files: `bin/agent-manager.sh
-status` for a summary, `tmux attach -t <session>` to watch an agent think, and
-`logs/mention-watcher.log` for what did and did not get woken. That log is the
-one to read first when an agent seems asleep, because it records every mention
-it saw and which agents it decided to wake.
+No dashboard in this repo. Visibility is tmux and the log files:
+`bin/agent-manager.sh status` for a summary, `tmux attach -t <session>` to
+watch an agent think, and `logs/mention-watcher.log` for what did and did not
+get woken. That log is the one to read first when an agent seems asleep,
+because it records every mention it saw and which agents it decided to wake.
+
+If you want a web view, [fleet-board](https://github.com/bjfultn/fleet-board)
+is a separate, optional dashboard that reads the same `fleet.json` and agent
+configs. It is a different repo on purpose: a fleet should not need a web
+server to run, and it does not.
 
 No orchestrator, no health checks, no auto-restart. An agent that dies stays
 dead until something restarts it, and nothing here notices. `agent-manager.sh
