@@ -23,7 +23,7 @@ fleet.json              fleet-level settings (you create this)
 agents/<name>/          one directory per agent
   config.json           identity, model, args, startup commands
   CLAUDE.md             persona and instructions
-  access.json           who may wake this agent
+  memory/               the agent's own notes, indexed by MEMORY.md
 bin/
   fleet-start.sh        starts the watcher, then every agent
   agent-manager.sh      start/stop/restart/status one agent or all
@@ -51,8 +51,12 @@ Then:
 
 It checks prerequisites, asks for fleet settings and each agent, and writes
 `fleet.json`, `shared/context.md`, and an `agents/<alias>/` directory per agent
-containing `config.json`, `CLAUDE.md`, `access.json`, and an empty memory index.
-On macOS it also writes a launchd plist for boot.
+containing `config.json`, `CLAUDE.md`, and an empty memory index. On macOS it
+also writes a launchd plist for boot.
+
+Each agent's `access.json`, which decides who may wake it and where it may
+speak, goes into that agent's Discord state directory rather than its agent
+directory, because that is where the plugin reads it from.
 
 Bot tokens are prompted for last, do not echo, and are written straight to each
 agent's state directory at mode 0600. They are deliberately not accepted from a
