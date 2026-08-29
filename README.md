@@ -31,6 +31,8 @@ bin/
   fleet-lib.sh          config loading, sourced by the others
 templates/              what setup.sh renders new agents from
 patches/                the Discord plugin patch (see below)
+spec.example.json       every key setup.sh --spec accepts
+CLAUDE.md               orientation for a Claude Code agent helping you set up
 ```
 
 `FLEET_ROOT` is the directory holding `fleet.json` and `agents/`. It defaults
@@ -69,14 +71,19 @@ Other modes:
 
 ```sh
 ./setup.sh --dry-run              # render everything, write nothing
-./setup.sh --spec answers.json    # non-interactive; tokens still prompted for
+./setup.sh --spec answers.json    # non-interactive, no terminal needed
 ./setup.sh --root /path/to/fleet  # provision somewhere other than this checkout
 ```
 
-`--spec` takes the same keys the prompts ask for, plus an `agents` array. Every
-agent is validated before anything is written, so a typo in a bot ID fails with
-a message naming the agent rather than provisioning a fleet member that quietly
-can never be woken.
+`--spec` takes the same keys the prompts ask for, plus an `agents` array;
+`spec.example.json` documents all of them. Every agent is validated before
+anything is written, and an unrecognised key is an error rather than being
+ignored, so a typo fails with a message naming the agent rather than
+provisioning a fleet member that quietly can never be woken.
+
+**`--spec` does not prompt for tokens**, because there may be nobody there to
+ask. It writes everything else and then lists the `.env` files you still owe
+it. A fleet provisioned this way is not runnable until you write them.
 
 Editing an existing fleet is a text edit, not a rerun: change the files under
 `agents/` and restart that agent. Rerunning `setup.sh` against a populated root
@@ -106,6 +113,22 @@ The cache is not versioned, so **a plugin update silently reverts this**. After
 any plugin upgrade, re-apply the patch and confirm agent-to-agent mentions
 still wake. Check for the patch before believing a "the agents stopped talking"
 report.
+
+## What this does not include
+
+No dashboard. Visibility is tmux and the log files: `bin/agent-manager.sh
+status` for a summary, `tmux attach -t <session>` to watch an agent think, and
+`logs/mention-watcher.log` for what did and did not get woken. That log is the
+one to read first when an agent seems asleep, because it records every mention
+it saw and which agents it decided to wake.
+
+No orchestrator, no health checks, no auto-restart. An agent that dies stays
+dead until something restarts it, and nothing here notices. `agent-manager.sh
+restart <name>` is the whole recovery story. Add supervision when you decide
+you want it rather than inheriting a design you did not choose.
+
+No memory, personas, or channel IDs. `setup.sh` generates a persona skeleton
+per agent from your answers; what the agents actually become is yours to write.
 
 ## Two things that are easy to get wrong
 

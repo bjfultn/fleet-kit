@@ -6,6 +6,10 @@ agents/
 shared/
 logs/
 *.log
+
+# Never commit a token, wherever it lands.
+.env
+.env.*
 com.fleet.*.plist
 __pycache__/
 *.pyc

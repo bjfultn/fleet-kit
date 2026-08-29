@@ -602,6 +602,26 @@ def poll():
 
                 targets = extract_mentioned_agents(msg)
                 if not targets:
+                    # A message that tagged SOMETHING and woke nobody is the
+                    # single most common "why is my agent asleep" case, and it
+                    # used to leave no trace at all: a role mention, or a
+                    # bot_id in a config that does not match the account the
+                    # agent actually runs as, both land here and `continue`
+                    # silently. That is a monitor that cannot tell "nothing
+                    # was asked of me" from "I could not see who was asked".
+                    # Say so, with the ids, so they can be compared against
+                    # the configs. Untagged chatter stays quiet.
+                    unmatched = [m.get("id", "") for m in msg.get("mentions", [])
+                                 if m.get("id") not in AGENTS
+                                 and m.get("id") != msg.get("author", {}).get("id", "")]
+                    roles = msg.get("mention_roles", [])
+                    if unmatched or roles:
+                        detail = []
+                        if unmatched:
+                            detail.append(f"users {unmatched}")
+                        if roles:
+                            detail.append(f"roles {roles} (role tags never wake anyone)")
+                        log(f"  mention woke nobody: {', '.join(detail)}")
                     continue
 
                 author = msg.get("author", {}).get("username", "unknown")
