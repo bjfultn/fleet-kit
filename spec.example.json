@@ -1,0 +1,34 @@
+{
+  "_comment": "Answers for `setup.sh --spec spec.example.json --root <fleet root>`, for provisioning without a terminal. Keys starting with _ are comments; any other unrecognised key is an error. Bot tokens are deliberately not accepted here, see the note at the bottom.",
+
+  "tmux_session": "agents",
+  "timezone": "UTC",
+  "owner_user_id": "000000000000000000",
+  "general_channel_id": "000000000000000000",
+  "log_dir": "~/fleet/logs",
+
+  "agents": [
+    {
+      "_comment": "Required: name, alias, bot_id, private_channel_id. The rest have defaults.",
+
+      "name": "Ada",
+      "alias": "ada",
+      "bot_id": "000000000000000000",
+      "private_channel_id": "000000000000000000",
+      "private_channel_name": "ada",
+
+      "role": "Head of Infrastructure",
+      "personality": "Dry, concise, has been paged at 3am too many times.",
+      "responsibilities": "servers, deploys, monitoring",
+      "lane": "anything that runs on a machine you own",
+      "claim_emoji": ":wrench:",
+
+      "model": "claude-sonnet-5",
+      "effort": "medium",
+
+      "_state_dir": "Optional. Where the Discord plugin keeps this agent's session state, .env and access.json. Defaults to ~/.claude/channels/discord-<alias>."
+    }
+  ],
+
+  "_tokens": "Not a key. Tokens are never read from a spec file: a token in JSON is a token in a backup, a git stash, and eventually a paste. After provisioning, write each one to its agent's state directory as .env at mode 0600, one line, DISCORD_BOT_TOKEN=..."
+}

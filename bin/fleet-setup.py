@@ -86,6 +86,25 @@ def preflight() -> list[str]:
 
 # ── prompting ───────────────────────────────────────────────────────────────
 
+def prompt_line(prompt: str) -> str:
+    """input(), but with something useful to say when there is nobody there.
+
+    Run without a terminal — from a script, or by an agent helping someone set
+    this up — every prompt raises EOFError and the whole thing exits on a raw
+    Python traceback that says nothing about what to do instead.
+    """
+    try:
+        return input(prompt).strip()
+    except EOFError:
+        print()
+        die("nothing on stdin: this asks questions and needs a terminal.\n"
+            "       To provision without one, put the answers in a JSON file "
+            "and pass --spec.\n"
+            "       See spec.example.json. Bot tokens are never read from a "
+            "spec; write\n"
+            "       each one to its agent's state directory as .env afterwards.")
+
+
 class Answers:
     """Prompts, or canned answers from a spec file. Same interface either way."""
 
@@ -104,7 +123,7 @@ class Answers:
 
         while True:
             suffix = f" [{default}]" if default else ""
-            val = input(f"  {prompt}{suffix}: ").strip() or default
+            val = prompt_line(f"  {prompt}{suffix}: ") or default
             if validate:
                 err = validate(val)
                 if err:
@@ -123,7 +142,7 @@ class Answers:
         while True:
             say()
             n = len(agents) + 1
-            name = input(f"  Agent {n} display name (blank to finish): ").strip()
+            name = prompt_line(f"  Agent {n} display name (blank to finish): ")
             if not name:
                 break
             a = {"name": name}
@@ -190,7 +209,13 @@ def validate_spec_keys(spec: dict) -> None:
     surprise later.
     """
     problems = []
-    for k in sorted(set(spec) - FLEET_KEYS):
+    # Keys starting with _ are comments. JSON has none, and fleet.example.json
+    # already uses the convention, so a spec written in the same style should
+    # not be rejected for it.
+    def unknown(keys, known):
+        return sorted(k for k in set(keys) - known if not k.startswith("_"))
+
+    for k in unknown(spec, FLEET_KEYS):
         problems.append(f"unknown key {k!r} (the fleet root is set with --root)"
                         if k in ("fleet_root", "root")
                         else f"unknown key {k!r}")
@@ -199,7 +224,7 @@ def validate_spec_keys(spec: dict) -> None:
             problems.append(f"agents entries must be objects, got {type(a).__name__}")
             continue
         who = a.get("name") or a.get("alias") or "?"
-        for k in sorted(set(a) - AGENT_KEYS):
+        for k in unknown(a, AGENT_KEYS):
             problems.append(f"{who}: unknown agent key {k!r}")
     if problems:
         for m in problems:
@@ -477,8 +502,13 @@ def main() -> int:
             if not tok:
                 warn(f"{a['name']}: no token written. That agent cannot connect yet.")
                 continue
-            env_path.write_text(f"DISCORD_BOT_TOKEN={tok}\n")
-            env_path.chmod(0o600)
+            # Create at 0600 rather than creating then chmod'ing. Between
+            # those two calls the file sits at whatever the umask allows,
+            # which on a shared box is long enough for anyone to read a live
+            # bot token. Open with the mode you want.
+            fd = os.open(env_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w") as fh:
+                fh.write(f"DISCORD_BOT_TOKEN={tok}\n")
             say(f"  {a['name']}: token written to {env_path}")
 
     # ── boot job ────────────────────────────────────────────────────────────
@@ -500,15 +530,37 @@ def main() -> int:
     say(f"Wrote {len(writer.written)} files under {root}")
     say()
     say("Next:")
-    say("  1. Apply the Discord plugin patch. Without it agents cannot wake each")
-    say("     other and nothing logs an error. See README.md.")
+    n = 0
+
+    def step(text: str, *rest: str) -> None:
+        nonlocal n
+        n += 1
+        say(f"  {n}. {text}")
+        for line in rest:
+            say(f"     {line}")
+
+    # Tokens first when they are missing, which is every --spec run: the token
+    # step only happens in the interactive path, so a non-interactive provision
+    # finishes "successfully" with no credentials anywhere. Listing the other
+    # steps without this one hands whoever is following along a checklist that
+    # cannot work, and the failure it produces looks like a broken fleet rather
+    # than a missing step.
+    missing = [a for a in agents if not (agent_state_dir(a) / ".env").exists()]
+    if missing:
+        step("Write each bot token. One line, DISCORD_BOT_TOKEN=..., mode 0600:")
+        for a in missing:
+            say(f"       {agent_state_dir(a) / '.env'}   ({a['name']})")
+        say("     Create the file at 0600 rather than chmod'ing afterwards, and")
+        say("     do not put tokens in the spec file or in shell history.")
+
+    step("Apply the Discord plugin patch. Without it agents cannot wake each",
+         "other and nothing logs an error. See README.md.")
     if sys.platform == "darwin":
-        say(f"  2. cp {label}.plist ~/Library/LaunchAgents/ && "
-            f"launchctl load ~/Library/LaunchAgents/{label}.plist")
-        say("  3. bin/fleet-start.sh")
+        step(f"cp {label}.plist ~/Library/LaunchAgents/ && "
+             f"launchctl load ~/Library/LaunchAgents/{label}.plist")
     else:
-        say("  2. Write a boot job for bin/fleet-start.sh (see docs/OPERATIONS.md).")
-        say("  3. bin/fleet-start.sh")
+        step("Write a boot job for bin/fleet-start.sh (see docs/OPERATIONS.md).")
+    step("bin/fleet-start.sh")
     say()
     say("Then tag one agent from another in Discord. If nothing wakes, the patch")
     say("is the first thing to check.")
