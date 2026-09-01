@@ -245,7 +245,32 @@ print(m.group(1) if m else '')
                 # TUI may show a predicted next command, and a blind second Enter could
                 # accept/send it. If a single Enter ever proves unreliable, verify the
                 # buffer cleared via capture-pane and re-send conditionally — never blind.
-                tmux send-keys -t "$TMUX_SESSION:$alias_name" "$cmd"
+                # Type the text in CHUNKS, not one shot.
+                #
+                # tmux delivers a multi-KB send-keys intact (measured to 8000
+                # bytes into a raw-mode reader, with and without -l), but the
+                # TUI on the other end does not consume it that fast: a 3128
+                # char command arrived with its leading ~2800 chars GONE and
+                # only the tail in the prompt. Curtis hit this on 2026-08-29 and
+                # noticed solely because the fragment was visibly broken. A
+                # truncation that still parses is the real hazard -- it would
+                # register a cron with a silently mangled prompt, and the job
+                # would then do the wrong thing on a schedule, forever, while
+                # looking perfectly healthy.
+                #
+                # Every command at or under ~1227 chars survived, so the ceiling
+                # sits somewhere above that. 400 is comfortably under it with
+                # room to spare, and the pauses give the TUI time to drain.
+                # send-keys -l because chunk boundaries can otherwise split a
+                # token that tmux would try to read as a key name.
+                _chunk=400
+                _i=0
+                _len=${#cmd}
+                while [ $_i -lt $_len ]; do
+                    tmux send-keys -t "$TMUX_SESSION:$alias_name" -l "${cmd:$_i:$_chunk}"
+                    _i=$((_i + _chunk))
+                    sleep 0.15
+                done
                 sleep 1
                 tmux send-keys -t "$TMUX_SESSION:$alias_name" Enter
 
