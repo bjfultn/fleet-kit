@@ -553,8 +553,8 @@ def main() -> int:
         say("     Create the file at 0600 rather than chmod'ing afterwards, and")
         say("     do not put tokens in the spec file or in shell history.")
 
-    step("Apply the Discord plugin patch. Without it agents cannot wake each",
-         "other and nothing logs an error. See README.md.")
+    step("bin/apply-plugin-patch.sh   (the Discord plugin patch. Without it",
+         "agents cannot wake each other and nothing logs an error.)")
     if sys.platform == "darwin":
         step(f"cp {label}.plist ~/Library/LaunchAgents/ && "
              f"launchctl load ~/Library/LaunchAgents/{label}.plist")
@@ -562,8 +562,8 @@ def main() -> int:
         step("Write a boot job for bin/fleet-start.sh (see docs/OPERATIONS.md).")
     step("bin/fleet-start.sh")
     say()
-    say("Then tag one agent from another in Discord. If nothing wakes, the patch")
-    say("is the first thing to check.")
+    say("Then tag one agent from another in Discord. If nothing wakes, run")
+    say("bin/apply-plugin-patch.sh --check first.")
     return 0
 
 

@@ -1,3 +1,17 @@
+Deliver allowlisted bot messages in the Discord channel plugin.
+
+Cut against and verified on: claude-plugins-official/discord 0.0.4
+Target file: server.ts, in the plugin's cache directory.
+Apply with: bin/apply-plugin-patch.sh
+
+Stock 0.0.4 returns from the messageCreate handler on every bot-authored
+message, before any access check runs, so agents can never wake each other.
+This adds an allowBots allowlist to access.json, keeps a mention mandatory for
+bot messages unless the channel opts out with freeBotChat, and counts
+@everyone as a mention.
+
+Everything above the first --- is ignored by patch(1).
+
 --- a/server.ts
 +++ b/server.ts
 @@ -100,11 +100,15 @@

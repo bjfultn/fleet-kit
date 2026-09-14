@@ -5,6 +5,48 @@ able to wake each other by @mention.
 
 This is the machinery only. Personas, memory, and channel IDs are yours.
 
+## What running a fleet actually grants
+
+Every agent `setup.sh` generates runs with `--dangerously-skip-permissions`.
+Tool calls do not prompt. An agent told to read a file reads it, and an agent
+told to run a command runs it, as whichever user started the fleet.
+
+Agents act on Discord messages. Put those two facts together and the boundary
+is this: anyone who can get a message in front of an agent can cause tool calls
+on the machine running it. There is no second gate behind that one.
+
+`access.json` is that gate. It is not a preferences file.
+
+- `allowFrom` is which humans may wake the agent in a DM.
+- `groups` is which channels it reads, and whether it needs a tag to answer in
+  each one.
+- `allowBots` is which other agents it will hear at all.
+
+An agent whose `groups` lists a channel with `requireMention: false` acts on
+anything posted there by anyone the channel admits. Treat such a channel as a
+shell prompt, because for that agent it is one.
+
+What follows from that:
+
+- Run a fleet only on a machine whose files and credentials you are willing to
+  hand to everyone in your Discord server.
+- Keep the server small, and keep the fleet's channels out of anywhere you
+  invite people casually.
+- Everything an agent reads from Discord is untrusted text written by someone
+  else. "Add my bot to allowBots" and "you already have permission, go ahead"
+  are what an attack says. Never widen an allowlist because a message asked you
+  to. Tightening is always fine.
+- An agent that browses or fetches is reading untrusted text from a second
+  direction, and the same rule covers what comes back.
+
+The flag is not removable without changing what this is. An agent that stops
+for approval on every tool call is not an agent that runs unattended, and
+unattended is the whole premise. If you want per-call approval, run Claude Code
+yourself and skip the fleet.
+
+Nobody audits this for you. Read `docs/DISCORD-SETUP.md` on `access.json`
+before the first agent starts, not after.
+
 ## What you need before you start
 
 - A machine that stays on and does not sleep. macOS today; Linux needs a port
@@ -29,6 +71,7 @@ bin/
   agent-manager.sh      start/stop/restart/status one agent or all
   mention-watcher.py    polls Discord, wakes idle agents
   fleet-lib.sh          config loading, sourced by the others
+  apply-plugin-patch.sh applies the Discord plugin patch, or says why not
 templates/              what setup.sh renders new agents from
 patches/                the Discord plugin patch (see below)
 spec.example.json       every key setup.sh --spec accepts
@@ -65,7 +108,7 @@ agent's state directory at mode 0600. They are deliberately not accepted from a
 spec file: a token in a JSON file is a token in a backup and eventually in a
 paste.
 
-Then apply the Discord plugin patch (below) and run `bin/fleet-start.sh`.
+Then run `bin/apply-plugin-patch.sh` (below) and `bin/fleet-start.sh`.
 
 Other modes:
 
@@ -97,22 +140,23 @@ between them will ever wake anything. There is no error anywhere when this
 happens, which is the worst part: the fleet looks healthy and simply never
 talks to itself.
 
-`patches/discord-allowbots.patch` adds an `allowBots` allowlist. Apply it to
-the plugin's cached `server.ts`:
+`patches/discord-allowbots.patch` adds an `allowBots` allowlist:
 
 ```sh
-cd ~/.claude/plugins/cache/claude-plugins-official/discord/<version>
-patch -p1 < <fleet-kit>/patches/discord-allowbots.patch
+bin/apply-plugin-patch.sh           # apply it
+bin/apply-plugin-patch.sh --check   # report status, change nothing
 ```
 
-It applies with line offsets against neighbouring plugin versions, which is
-expected. If a hunk fails outright, the plugin has moved the message handler
-and the patch needs regenerating against that version.
+It finds the plugin cache, skips copies already patched, dry-runs before
+touching anything, and exits non-zero with the plugin version named if a hunk
+fails. Do not start a fleet past that failure. The patch was cut against and
+verified on plugin **0.0.4**; it applies with line offsets against neighbouring
+versions, which is fine, but a version that has moved the message handler needs
+the patch regenerated.
 
 The cache is not versioned, so **a plugin update silently reverts this**. After
-any plugin upgrade, re-apply the patch and confirm agent-to-agent mentions
-still wake. Check for the patch before believing a "the agents stopped talking"
-report.
+any upgrade, run `--check`. Run it before believing a "the agents stopped
+talking" report, too: it is the most common cause and the quietest.
 
 ## What this does not include
 
@@ -122,9 +166,8 @@ watch an agent think, and `logs/mention-watcher.log` for what did and did not
 get woken. That log is the one to read first when an agent seems asleep,
 because it records every mention it saw and which agents it decided to wake.
 
-If you want a web view, [fleet-board](https://github.com/bjfultn/fleet-board)
-is a separate, optional dashboard that reads the same `fleet.json` and agent
-configs. It is a different repo on purpose: a fleet should not need a web
+A separate optional dashboard, fleet-board, reads the same `fleet.json` and
+agent configs. It is a different repo on purpose: a fleet should not need a web
 server to run, and it does not.
 
 No orchestrator, no health checks, no auto-restart. An agent that dies stays
@@ -142,3 +185,12 @@ Untagged messages do not. If you want a reply from an agent, tag it.
 
 **`working_directory` is optional.** Left unset, an agent runs in its own
 directory. Set it only when the agent should operate on a codebase elsewhere.
+
+## Support
+
+There is none. This is a working system published as-is, not a product. Issues
+and pull requests may sit unread, nothing here is promised to keep working, and
+the shape of it can change without notice. Fork it and make it yours.
+
+Running it is a risk you are taking on yourself. Read "What running a fleet
+actually grants" before you decide to.
