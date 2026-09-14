@@ -186,6 +186,11 @@ Untagged messages do not. If you want a reply from an agent, tag it.
 **`working_directory` is optional.** Left unset, an agent runs in its own
 directory. Set it only when the agent should operate on a codebase elsewhere.
 
+## License
+
+MIT. See [LICENSE](LICENSE). Copyright Adaptive Intelligence Solutions, LLC,
+<https://adaptiveintelsolutions.com>.
+
 ## Support
 
 There is none. This is a working system published as-is, not a product. Issues
