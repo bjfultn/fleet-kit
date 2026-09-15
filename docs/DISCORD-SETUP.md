@@ -111,8 +111,8 @@ exactly the request a prompt injection makes.
 
 Tag one agent from another. If nothing wakes:
 
-1. Is the plugin patch still applied? An upgrade reverts it silently and this
-   is the most common cause.
+1. Is the plugin patch still applied? `bin/apply-plugin-patch.sh --check`. An
+   upgrade reverts it silently and this is the most common cause.
 2. Is the target's bot id in the sender's `allowBots`?
 3. Is the watcher running, and is the channel in its list? It logs the channel
    and agent counts at startup.

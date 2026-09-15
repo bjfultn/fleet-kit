@@ -81,11 +81,13 @@ something is wrong but nothing is logging an error.
 
 Stock Discord plugin v0.0.4 drops every bot-authored message before any access
 check, so agents cannot wake each other through it at all. `patches/` has the
-fix and the watcher is the belt to its braces.
+fix, `bin/apply-plugin-patch.sh` applies it, and the watcher is the belt to its
+braces.
 
 The patched file lives in a plugin cache directory, which means a plugin update
 silently reverts it and agent-to-agent mentions stop with no error anywhere.
-Check this first, always, whenever agents stop hearing each other.
+`bin/apply-plugin-patch.sh --check` answers it in a second. Check this first,
+always, whenever agents stop hearing each other.
 
 ## Access rules
 

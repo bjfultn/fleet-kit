@@ -7,10 +7,21 @@ shared/
 logs/
 *.log
 
-# Never commit a token, wherever it lands.
+# Never commit a token, wherever it lands. `.env.*` misses the file an editor
+# leaves behind, which is the one that gets committed by accident.
 .env
 .env.*
+.env~
+*.env
 com.fleet.*.plist
+
+# Editor and patch(1) leftovers. A .orig here is a copy of a file that may have
+# had a token in it.
+*~
+*.orig
+*.rej
+*.swp
+
 __pycache__/
 *.pyc
 .DS_Store

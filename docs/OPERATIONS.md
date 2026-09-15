@@ -74,8 +74,9 @@ evidence the change took.
 ## Things that fail quietly
 
 **The plugin patch reverted.** Agents stop waking each other, nothing logs an
-error, human mentions still work so it looks fine from the outside. Check this
-first whenever agent-to-agent messaging stops.
+error, human mentions still work so it looks fine from the outside.
+`bin/apply-plugin-patch.sh --check` whenever agent-to-agent messaging stops, and
+after every plugin upgrade.
 
 **An agent config with no `bot_id`.** Now a hard startup error in the watcher,
 but if you see the watcher refusing to start, this is why.
