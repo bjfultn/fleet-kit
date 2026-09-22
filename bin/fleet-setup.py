@@ -19,10 +19,12 @@ import getpass
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
 from pathlib import Path
+from xml.sax.saxutils import escape as xml_escape
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
@@ -515,11 +517,16 @@ def main() -> int:
     if sys.platform == "darwin":
         label = ans.ask("launchd_label", "launchd label",
                         f"com.fleet.{tmux_session}")
+        # Every value here lands inside an XML element. A path holding & or <
+        # renders a plist launchd will not parse, and the error surfaces at
+        # boot rather than here.
         plist = render(TEMPLATES / "launchd" / "fleet.plist.tmpl", {
-            "LABEL": label,
-            "KIT_BIN": str(ROOT / "bin"),
-            "FLEET_ROOT": str(root),
-            "LOG_DIR": os.path.expanduser(log_dir),
+            k: xml_escape(v) for k, v in {
+                "LABEL": label,
+                "KIT_BIN": str(ROOT / "bin"),
+                "FLEET_ROOT": str(root),
+                "LOG_DIR": os.path.expanduser(log_dir),
+            }.items()
         })
         writer.write(root / f"{label}.plist", plist)
 
@@ -554,20 +561,32 @@ def main() -> int:
         say("     Create the file at 0600 rather than chmod'ing afterwards, and")
         say("     do not put tokens in the spec file or in shell history.")
 
-    # The scripts live in the checkout and the plist was written to the fleet
-    # root, which --root can make two different directories. Relative paths
-    # then only work from whichever one the reader happens to be standing in,
-    # so spell them out when they differ.
-    kit = "bin/" if root == ROOT else f"{ROOT / 'bin'}/"
+    # The scripts live in the checkout and the fleet lives at --root, which
+    # are two different directories unless --root was left at its default.
+    # When they differ a relative path only works from whichever one the
+    # reader happens to be standing in, and fleet-start.sh additionally needs
+    # FLEET_ROOT to find the fleet at all: without it fleet-lib.sh looks
+    # beside the checkout and stops. Spell both out when they differ, and
+    # print exactly what was printed before when they do not.
+    external_root = root != ROOT
+    kit = f"{shlex.quote(str(ROOT / 'bin'))}/" if external_root else "bin/"
+    with_root = f"FLEET_ROOT={shlex.quote(str(root))} " if external_root else ""
 
     step(f"{kit}apply-plugin-patch.sh   (the Discord plugin patch. Without it",
          "agents cannot wake each other and nothing logs an error.)")
     if sys.platform == "darwin":
-        step(f"cp {root / f'{label}.plist'} ~/Library/LaunchAgents/ && "
-             f"launchctl load ~/Library/LaunchAgents/{label}.plist")
+        agents_d = os.path.expanduser("~/Library/LaunchAgents")
+        plist_src = shlex.quote(str(root / f"{label}.plist"))
+        plist_dst = shlex.quote(os.path.join(agents_d, f"{label}.plist"))
+        step(f"cp {plist_src} {shlex.quote(agents_d)}/ && "
+             f"launchctl load {plist_dst}")
+    elif external_root:
+        step(f"Write a boot job for {kit}fleet-start.sh (see docs/OPERATIONS.md).",
+             f"It has to set FLEET_ROOT={shlex.quote(str(root))} or the script",
+             "looks for the fleet beside the checkout and stops.")
     else:
         step(f"Write a boot job for {kit}fleet-start.sh (see docs/OPERATIONS.md).")
-    step(f"{kit}fleet-start.sh")
+    step(f"{with_root}{kit}fleet-start.sh")
     say()
     say("Then tag one agent from another in Discord. If nothing wakes, run")
     say(f"{kit}apply-plugin-patch.sh --check first.")
