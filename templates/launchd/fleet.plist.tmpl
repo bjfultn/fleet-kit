@@ -5,10 +5,16 @@
     <key>Label</key>
     <string>{{LABEL}}</string>
 
+    <!-- The script lives in the kit checkout; the fleet it starts may live
+         somewhere else entirely (setup.sh --root). Those are two different
+         directories, so ProgramArguments must name the checkout and
+         FLEET_ROOT below must name the fleet. Pointing both at the fleet
+         root produces a plist launchd loads without complaint and a fleet
+         that never starts. -->
     <key>ProgramArguments</key>
     <array>
         <string>/bin/bash</string>
-        <string>{{FLEET_ROOT}}/bin/fleet-start.sh</string>
+        <string>{{KIT_BIN}}/fleet-start.sh</string>
     </array>
 
     <key>EnvironmentVariables</key>

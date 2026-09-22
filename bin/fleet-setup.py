@@ -517,6 +517,7 @@ def main() -> int:
                         f"com.fleet.{tmux_session}")
         plist = render(TEMPLATES / "launchd" / "fleet.plist.tmpl", {
             "LABEL": label,
+            "KIT_BIN": str(ROOT / "bin"),
             "FLEET_ROOT": str(root),
             "LOG_DIR": os.path.expanduser(log_dir),
         })
@@ -553,17 +554,23 @@ def main() -> int:
         say("     Create the file at 0600 rather than chmod'ing afterwards, and")
         say("     do not put tokens in the spec file or in shell history.")
 
-    step("bin/apply-plugin-patch.sh   (the Discord plugin patch. Without it",
+    # The scripts live in the checkout and the plist was written to the fleet
+    # root, which --root can make two different directories. Relative paths
+    # then only work from whichever one the reader happens to be standing in,
+    # so spell them out when they differ.
+    kit = "bin/" if root == ROOT else f"{ROOT / 'bin'}/"
+
+    step(f"{kit}apply-plugin-patch.sh   (the Discord plugin patch. Without it",
          "agents cannot wake each other and nothing logs an error.)")
     if sys.platform == "darwin":
-        step(f"cp {label}.plist ~/Library/LaunchAgents/ && "
+        step(f"cp {root / f'{label}.plist'} ~/Library/LaunchAgents/ && "
              f"launchctl load ~/Library/LaunchAgents/{label}.plist")
     else:
-        step("Write a boot job for bin/fleet-start.sh (see docs/OPERATIONS.md).")
-    step("bin/fleet-start.sh")
+        step(f"Write a boot job for {kit}fleet-start.sh (see docs/OPERATIONS.md).")
+    step(f"{kit}fleet-start.sh")
     say()
     say("Then tag one agent from another in Discord. If nothing wakes, run")
-    say("bin/apply-plugin-patch.sh --check first.")
+    say(f"{kit}apply-plugin-patch.sh --check first.")
     return 0
 
 
