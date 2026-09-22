@@ -1,5 +1,5 @@
 {
-  "_comment": "Fleet-level settings. Copy to fleet.json and edit. Anything not set here falls back to the defaults shown in docs/ARCHITECTURE.md.",
+  "_comment": "Fleet-level settings, read at startup by the scripts in bin/. Copy to fleet.json and edit. Every key the scripts read appears here; keys prefixed with _ are comments for the optional ones, which are safe to leave out. Per-agent settings (model, effort, bot id, channel) live in that agent's own config.json, not here.",
 
   "tmux_session": "agents",
   "timezone": "UTC",
@@ -10,11 +10,11 @@
 
   "python": "python3",
 
-  "shared_prompt": "shared/context.md",
+  "_agents_dir": "Optional. Where the agent directories live. Absolute, or relative to the fleet root. Defaults to <fleet root>/agents.",
+
+  "_watcher_token_file": "Optional. Which bot token the mention watcher polls with. Defaults to the first agent's .env, and any bot in the server can poll, so most fleets never set this.",
 
   "defaults": {
-    "model": "claude-sonnet-5",
-    "effort": "medium",
     "auto_compact_window": 200000
   }
 }
