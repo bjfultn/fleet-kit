@@ -262,12 +262,14 @@ print(m.group(1) if m else '')
                 # sits somewhere above that. 400 is comfortably under it with
                 # room to spare, and the pauses give the TUI time to drain.
                 # send-keys -l because chunk boundaries can otherwise split a
-                # token that tmux would try to read as a key name.
+                # token that tmux would try to read as a key name. The `--`
+                # stops tmux reading a chunk that starts with "-" as a flag
+                # ("send-keys: unknown flag -r" dropped that chunk).
                 _chunk=400
                 _i=0
                 _len=${#cmd}
                 while [ $_i -lt $_len ]; do
-                    tmux send-keys -t "$TMUX_SESSION:$alias_name" -l "${cmd:$_i:$_chunk}"
+                    tmux send-keys -t "$TMUX_SESSION:$alias_name" -l -- "${cmd:$_i:$_chunk}"
                     _i=$((_i + _chunk))
                     sleep 0.15
                 done
