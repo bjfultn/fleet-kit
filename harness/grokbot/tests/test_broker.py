@@ -876,7 +876,10 @@ def rpc(path, req, timeout=10):
     s.settimeout(timeout)
     try:
         s.connect(path)
-        s.sendall(req if isinstance(req, bytes) else json.dumps(req).encode() + b"\n")
+        try:
+            s.sendall(req if isinstance(req, bytes) else json.dumps(req).encode() + b"\n")
+        except (BrokenPipeError, ConnectionResetError):
+            pass   # the broker already answered and closed ("busy"); read its reply
         buf = b""
         while not buf.endswith(b"\n"):
             chunk = s.recv(4096)
