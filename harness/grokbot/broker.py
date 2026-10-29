@@ -29,6 +29,7 @@ message bodies.
 """
 
 import argparse
+import grp
 import json
 import math
 import os
@@ -766,8 +767,15 @@ class _Server(socketserver.ThreadingUnixStreamServer):
     daemon_threads = True
     request_queue_size = 16
 
-    def __init__(self, path, handler):
+    def __init__(self, path, handler, socket_group=None):
         self.slots = threading.BoundedSemaphore(MAX_CONNS)
+        self.socket_gid = None
+        if socket_group:
+            try:  # resolve before binding so a typo leaves no socket behind
+                self.socket_gid = grp.getgrnam(socket_group).gr_gid
+            except KeyError:
+                raise SystemExit("broker: socket_group %r is not a known group"
+                                 % socket_group) from None
         super().__init__(path, handler)
 
     def process_request(self, request, client_address):
@@ -820,11 +828,13 @@ class _Server(socketserver.ThreadingUnixStreamServer):
         finally:
             os.umask(old)
         os.chmod(path, 0o660)
+        if self.socket_gid is not None:
+            os.chown(path, -1, self.socket_gid)
 
 
 def make_server(broker, config):
     cfg = {**DEFAULTS, **config}
-    server = _Server(cfg["socket"], _Handler)
+    server = _Server(cfg["socket"], _Handler, cfg.get("socket_group"))
     server.broker = broker
     server.cfg = cfg
     return server

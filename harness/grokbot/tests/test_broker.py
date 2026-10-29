@@ -727,6 +727,24 @@ class TestServer(BrokerCase):
         self.assertEqual(os.stat(path).st_mode & 0o777, 0o660)
         self.assertTrue(rpc(path, {"op": "check"})["ok"])
 
+    def test_socket_group_chowns_the_socket(self):
+        fake = mock.Mock(gr_gid=4321)
+        with mock.patch.object(bk.grp, "getgrnam", return_value=fake) as g, \
+                mock.patch.object(bk.os, "chown") as chown:
+            path = self.serve(socket_group="example")
+        g.assert_called_once_with("example")
+        chown.assert_called_once_with(path, -1, 4321)
+
+    def test_unknown_socket_group_fails_startup_with_one_line(self):
+        cfg = make_config(self.tmp, socket_group="no-such-group-here")
+        broker = bk.Broker(cfg, self.discord)
+        with mock.patch.object(bk.grp, "getgrnam", side_effect=KeyError("x")):
+            with self.assertRaises(SystemExit) as cm:
+                bk.make_server(broker, cfg)
+        self.assertIn("socket_group", str(cm.exception.code))
+        self.assertNotIn("\n", str(cm.exception.code))
+        self.assertFalse(os.path.exists(cfg["socket"]))
+
     def test_malformed_input_gets_plain_errors(self):
         path = self.serve(max_line=200)
         for raw in (b"not json\n", b"[1, 2]\n", b'{"op": "dance"}\n', b"x" * 500 + b"\n"):

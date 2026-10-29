@@ -1,0 +1,36 @@
+[Unit]
+Description=__AGENT__ Discord broker (holds the bot token, serves the team socket)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=__AGENT__-broker
+Group=__AGENT__-broker
+# Membership of the agent's group is what lets the broker chown the socket to it
+# (config key socket_group). The agent uid gets no access to anything else here.
+SupplementaryGroups=__AGENT__
+ExecStart=/usr/bin/python3 -I /usr/local/lib/__AGENT__-broker/broker.py --config /etc/__AGENT__-broker/broker.json
+# RuntimeDirectory takes the unit's own group, so the directory is 0755 and the
+# socket inside it carries the access control (0660, group __AGENT__).
+RuntimeDirectory=__AGENT__-broker
+RuntimeDirectoryMode=0755
+StateDirectory=__AGENT__-broker
+StateDirectoryMode=0750
+LogsDirectory=__AGENT__-broker
+LogsDirectoryMode=0750
+UMask=0027
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+ReadOnlyPaths=/etc/__AGENT__-broker
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

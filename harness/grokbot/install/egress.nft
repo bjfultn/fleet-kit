@@ -1,0 +1,36 @@
+# Egress policy for the __AGENT__ uid. Every rule is scoped by skuid, so no
+# other user on the box is touched. Applied atomically: the first two lines
+# create-then-delete the table so the file works whether or not it exists, and
+# the whole file is one nft transaction.
+#
+# Check with:  nft -c -f /etc/__AGENT__-firewall/egress.nft
+# Apply with:  nft -f /etc/__AGENT__-firewall/egress.nft
+table inet __AGENT___egress
+delete table inet __AGENT___egress
+table inet __AGENT___egress {
+	chain output {
+		type filter hook output priority 0; policy accept;
+
+		meta skuid "__AGENT__" ct state established,related accept
+
+		# DNS through the local stub resolver only.
+		meta skuid "__AGENT__" ip daddr 127.0.0.53 udp dport 53 accept
+		meta skuid "__AGENT__" ip daddr 127.0.0.53 tcp dport 53 accept
+
+		# Loopback and every private or local range: no host services, no LAN.
+		meta skuid "__AGENT__" ip daddr 127.0.0.0/8 drop
+		meta skuid "__AGENT__" ip6 daddr ::1 drop
+		meta skuid "__AGENT__" ip daddr 10.0.0.0/8 drop
+		meta skuid "__AGENT__" ip daddr 172.16.0.0/12 drop
+		meta skuid "__AGENT__" ip daddr 192.168.0.0/16 drop
+		meta skuid "__AGENT__" ip daddr 169.254.0.0/16 drop
+		meta skuid "__AGENT__" ip daddr 100.64.0.0/10 drop
+		meta skuid "__AGENT__" ip6 daddr fc00::/7 drop
+		meta skuid "__AGENT__" ip6 daddr fe80::/10 drop
+
+		# Web only.
+		meta skuid "__AGENT__" tcp dport { 80, 443 } accept
+
+		meta skuid "__AGENT__" drop
+	}
+}

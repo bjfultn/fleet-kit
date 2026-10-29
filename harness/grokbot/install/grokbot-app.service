@@ -1,0 +1,32 @@
+[Unit]
+Description=__AGENT__ Grok Bot desktop app (confined)
+Requires=__AGENT__-egress.service
+BindsTo=__AGENT__-egress.service
+After=__AGENT__-egress.service
+After=__AGENT__-broker.service
+
+[Service]
+Type=simple
+User=__AGENT__
+Group=__AGENT__
+WorkingDirectory=/home/__AGENT__
+Environment=HOME=/home/__AGENT__
+Environment=TEAM_SOCKET=/run/__AGENT__-broker/team.sock
+ExecStart=/usr/bin/xvfb-run -a -s "-screen 0 1280x800x24" grok-bot --password-store=basic
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/home/__AGENT__
+# The leading "-" keeps a path that does not exist on this box from failing the unit.
+InaccessiblePaths=-/opt/web -/home/ops -/srv -/var/lib/docker -/etc/__AGENT__-broker -/var/lib/__AGENT__-broker -/run/docker.sock
+PrivateTmp=yes
+ProtectProc=invisible
+ProcSubset=pid
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+ProtectHome=tmpfs
+BindPaths=/home/__AGENT__
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

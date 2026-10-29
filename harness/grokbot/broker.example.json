@@ -17,6 +17,7 @@
   "token_file": "/var/lib/example-broker/token",
   "allowed_uid": 1001,
   "socket": "/var/lib/example-broker/broker.sock",
+  "socket_group": "example",
   "state_dir": "/var/lib/example-broker/state",
   "log_file": "/var/lib/example-broker/broker.log",
   "rate_per_minute": 6,
