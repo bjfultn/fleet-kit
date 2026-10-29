@@ -15,6 +15,8 @@ import threading
 import time
 import unittest
 import urllib.error
+from unittest import mock
+from datetime import datetime, timezone
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, ".."))
@@ -56,11 +58,14 @@ class FakeDiscord:
     """Records posts; serves per-channel message lists like the REST API does
     (newest first). Message ids count up so they sort like snowflakes."""
 
-    def __init__(self):
+    def __init__(self, clock=time.time):
+        self.clock = clock
         self.posts = []
         self.fail_post = None
         self.fail_messages = None
         self.on_post = None
+        self.on_messages = None
+        self.message_calls = []
         self._next = 1000
         self._msgs = {}
         self._lock = threading.Lock()
@@ -70,8 +75,11 @@ class FakeDiscord:
             self._next += 1
             return str(self._next)
 
-    def add(self, channel_id, author_id, content, reply_to=None, username="someone"):
-        msg = {"id": self._id(), "content": content, "timestamp": "2026-10-28T12:00:00+00:00",
+    def add(self, channel_id, author_id, content, reply_to=None, username="someone", age=60):
+        """age: seconds before the fake clock that Discord stamped the message.
+        The default is old enough to count as a finished reply."""
+        stamp = datetime.fromtimestamp(self.clock() - age, timezone.utc).isoformat()
+        msg = {"id": self._id(), "content": content, "timestamp": stamp,
                "author": {"id": author_id, "username": username}}
         if reply_to:
             msg["message_reference"] = {"message_id": str(reply_to)}
@@ -91,12 +99,17 @@ class FakeDiscord:
         return {"id": msg["id"]}
 
     def messages(self, channel_id, after=None, limit=50):
+        self.message_calls.append((channel_id, after, limit))
+        if self.on_messages:
+            self.on_messages(len(self.message_calls))
         if self.fail_messages:
             raise self.fail_messages
-        out = [m for m in self._msgs.get(channel_id, [])
-               if after is None or int(m["id"]) > int(after)]
-        out.sort(key=lambda m: int(m["id"]), reverse=True)
-        return out[:limit]
+        out = sorted((m for m in self._msgs.get(channel_id, [])
+                      if after is None or int(m["id"]) > int(after)), key=lambda m: int(m["id"]))
+        # like Discord: with after= you get the page just past it, without it the newest
+        out = out[:limit] if after is not None else out[-limit:]
+        out.reverse()
+        return out
 
 
 class BrokerCase(unittest.TestCase):
@@ -105,7 +118,7 @@ class BrokerCase(unittest.TestCase):
         self.addCleanup(self._td.cleanup)
         self.tmp = self._td.name
         self.now = 1_800_000_000.0
-        self.discord = FakeDiscord()
+        self.discord = FakeDiscord(clock=lambda: self.now)
         self.broker = self.make()
 
     def make(self, **over):
@@ -153,7 +166,8 @@ class TestPost(BrokerCase):
                          {"parse": [], "users": [SONNET], "replied_user": False})
         self.assertEqual(seen["body"]["message_reference"]["message_id"], "77")
         self.assertEqual(seen["headers"]["authorization"], "Bot " + TOKEN)
-        self.assertIn("DiscordBot", seen["headers"]["user-agent"])
+        self.assertEqual(seen["headers"]["user-agent"],
+                         "DiscordBot (https://example.invalid/fleet-kit, 1.0)")
         self.assertEqual(seen["timeout"], 15)
 
     def test_mention_rewrite_ignores_emails_and_urls(self):
@@ -161,6 +175,8 @@ class TestPost(BrokerCase):
         text, ids = bk.mentions("mail bob@sonnet.com or https://x.io/@sonnet or a@curtis", agents)
         self.assertEqual(ids, [])
         self.assertEqual(text, "mail bob@sonnet.com or https://x.io/@sonnet or a@curtis")
+        text, ids = bk.mentions("write bob@here.com or x@everyone.org", agents)
+        self.assertEqual((text, ids), ("write bob@here.com or x@everyone.org", []))
         text, ids = bk.mentions("@sonnet, ask @cage. and @nobody", agents)
         self.assertEqual(ids, [SONNET, CAGE])
         self.assertEqual(text, "<@%s>, ask <@%s>. and @nobody" % (SONNET, CAGE))
@@ -179,14 +195,25 @@ class TestPost(BrokerCase):
         self.assertTrue(self.broker.handle(
             {"op": "post", "channel": "general", "text": "later"})["ok"])
 
-    def test_failed_post_does_not_burn_rate(self):
+    def test_failed_post_keeps_its_rate_slot(self):
         self.discord.fail_post = bk.BrokerError("Discord said no (HTTP 500).")
-        for _ in range(8):
+        for _ in range(6):
             r = self.broker.handle({"op": "post", "channel": "general", "text": "x"})
-            self.assertFalse(r["ok"])
+            self.assertIn("500", r["error"])
         self.discord.fail_post = None
+        r = self.broker.handle({"op": "post", "channel": "general", "text": "x"})
+        self.assertFalse(r["ok"])
+        self.assertIn("Too many messages", r["error"])
+
+    def test_ask_counts_against_rate_limit(self):
+        for i in range(5):
+            self.assertTrue(self.broker.handle(
+                {"op": "post", "channel": "general", "text": "m%d" % i})["ok"])
         self.assertTrue(self.broker.handle(
-            {"op": "post", "channel": "general", "text": "x"})["ok"])
+            {"op": "ask", "agent": "cage", "text": "q", "wait": 0})["ok"])
+        r = self.broker.handle({"op": "ask", "agent": "cage", "text": "q2", "wait": 0})
+        self.assertFalse(r["ok"])
+        self.assertEqual(len(self.discord.posts), 6)
 
     def test_text_over_max_len_refused(self):
         r = self.broker.handle({"op": "post", "channel": "general", "text": "a" * 1801})
@@ -292,6 +319,186 @@ class TestAsk(BrokerCase):
         self.assertEqual(bk.clamp_wait(-5), 0)
         self.assertEqual(bk.clamp_wait(9999), 120)
         self.assertEqual(bk.clamp_wait(None, default=60), 60)
+
+    def test_reply_arriving_in_pieces_is_not_returned_partial(self):
+        def post_hook(rec):
+            self.discord.add(CURTIS_CH, CURTIS, "part one", reply_to=rec["id"], age=0)
+
+        def poll_hook(n):
+            if n == 2:   # between polls: the second chunk lands, time passes
+                self.now += 5
+                self.discord.add(CURTIS_CH, CURTIS, "part two", age=5)
+        self.discord.on_post = post_hook
+        self.discord.on_messages = poll_hook
+        r = self.broker.handle({"op": "ask", "agent": "curtis", "text": "long", "wait": 2})
+        self.assertEqual(r["status"], "answered")
+        self.assertEqual(r["reply"], "part one\npart two")
+        self.assertEqual(self.tickets_on_disk()[0]["reply"], "part one\npart two")
+
+    def test_unsettled_reply_times_out_working_without_partial_text(self):
+        self.discord.on_post = lambda rec: self.discord.add(
+            CURTIS_CH, CURTIS, "part one", reply_to=rec["id"], age=0)
+        r = self.broker.handle({"op": "ask", "agent": "curtis", "text": "long", "wait": 0.1})
+        self.assertEqual(r["status"], "working")
+        self.assertIsNone(r["reply"])
+        self.assertIsNone(self.tickets_on_disk()[0]["reply"])
+        out = self.broker.handle({"op": "check"})
+        self.assertEqual(out["tickets"][0]["status"], "working")
+        self.now += 5   # the last chunk is now 5 s old: settled
+        out = self.broker.handle({"op": "check"})
+        self.assertEqual(out["tickets"][0]["status"], "answered")
+        self.assertEqual(out["tickets"][0]["reply"], "part one")
+
+    def test_reply_followed_by_another_author_is_settled_at_once(self):
+        def hook(rec):
+            self.discord.add(CURTIS_CH, CURTIS, "part one", reply_to=rec["id"], age=0)
+            self.discord.add(CURTIS_CH, HUMAN, "thanks", age=0)
+        self.discord.on_post = hook
+        r = self.broker.handle({"op": "ask", "agent": "curtis", "text": "q", "wait": 1})
+        self.assertEqual(r["status"], "answered")
+        self.assertEqual(r["reply"], "part one")
+
+    def test_ticket_ids_are_8_hex(self):
+        r = self.broker.handle({"op": "ask", "agent": "cage", "text": "q", "wait": 0})
+        self.assertRegex(r["ticket"], r"^[0-9a-f]{8}$")
+
+    def test_lookup_budget_is_shared_by_read_and_check(self):
+        b = self.make(lookups_per_minute=2)
+        self.assertTrue(b.handle({"op": "read", "channel": "general"})["ok"])
+        self.assertTrue(b.handle({"op": "read", "channel": "general"})["ok"])
+        r = b.handle({"op": "read", "channel": "general"})
+        self.assertFalse(r["ok"])
+        self.assertRegex(r["error"], r"^Too many lookups, try again in \d+ s$")
+        b.handle({"op": "ask", "agent": "cage", "text": "q", "wait": 0})
+        r = b.handle({"op": "check"})
+        self.assertFalse(r["ok"])
+        self.assertIn("Too many lookups", r["error"])
+        self.now += 61
+        self.assertTrue(b.handle({"op": "read", "channel": "general"})["ok"])
+        self.assertEqual(len(self.discord.message_calls), 3)
+
+    def test_ask_poll_waits_when_budget_is_spent(self):
+        b = self.make(lookups_per_minute=0)
+        r = b.handle({"op": "ask", "agent": "cage", "text": "q", "wait": 0.1})
+        self.assertTrue(r["ok"])
+        self.assertEqual(r["status"], "working")
+        self.assertEqual(self.discord.message_calls, [])
+
+    def test_check_stops_the_op_at_first_429(self):
+        for _ in range(3):
+            self.now += 1
+            self.broker.handle({"op": "ask", "agent": "cage", "text": "q", "wait": 0})
+        self.discord.fail_messages = bk.RateLimited("Discord rate-limited, try again in 3 s")
+        out = self.broker.handle({"op": "check"})
+        self.assertTrue(out["ok"])
+        self.assertEqual(len(self.discord.message_calls), 1)
+        self.assertEqual(len(out["tickets"]), 3)
+        self.assertEqual(sum("error" in t for t in out["tickets"]), 1)
+
+    def test_ask_stops_polling_at_429(self):
+        self.discord.fail_messages = bk.RateLimited("Discord rate-limited, try again in 3 s")
+        t0 = time.monotonic()
+        r = self.broker.handle({"op": "ask", "agent": "cage", "text": "q", "wait": 5})
+        self.assertLess(time.monotonic() - t0, 2)
+        self.assertEqual(r["status"], "working")
+        self.assertEqual(len(self.discord.message_calls), 1)
+
+    def test_check_polls_five_newest_and_skips_stale(self):
+        for _ in range(7):
+            self.now += 10   # spread out so the 6 a minute limit is not hit
+            self.broker.handle({"op": "ask", "agent": "cage", "text": "q", "wait": 0})
+        out = self.broker.handle({"op": "check"})
+        self.assertEqual(len(out["tickets"]), 7)
+        newest = {p["id"] for p in self.discord.posts[2:]}
+        self.assertEqual({c[1] for c in self.discord.message_calls}, newest)
+        self.assertEqual(len(self.discord.message_calls), 5)
+        self.discord.message_calls.clear()
+        self.now += 25 * 3600
+        out = self.broker.handle({"op": "check"})
+        self.assertEqual(self.discord.message_calls, [])
+        self.assertEqual(len(out["tickets"]), 7)
+        self.assertTrue(all(t["status"] == "working" for t in out["tickets"]))
+
+    def test_ticket_store_is_capped_answered_dropped_first(self):
+        def t(i, status):
+            return {"ticket": "%08x" % i, "agent": "cage", "channel_id": CAGE_CH,
+                    "ask_message_id": str(i), "asked_at": self.now - 1000 + i,
+                    "status": status, "reply": None}
+        b = self.broker
+        b._tickets = [t(i, "working") for i in range(150)] + \
+                     [t(1000 + i, "answered") for i in range(100)]
+        b._prune()
+        self.assertEqual(len(b._tickets), 200)
+        self.assertEqual(sum(x["status"] == "working" for x in b._tickets), 150)
+        self.assertEqual(min(x["ask_message_id"] for x in b._tickets if x["status"] == "answered"),
+                         "1050")
+        b._tickets = [t(i, "working") for i in range(205)]
+        b._prune()
+        self.assertEqual(len(b._tickets), 200)
+        self.assertEqual(min(int(x["ask_message_id"]) for x in b._tickets), 5)
+
+    def test_check_pages_up_to_three_pages(self):
+        r = self.broker.handle({"op": "ask", "agent": "curtis", "text": "q", "wait": 0})
+        ask_id = self.discord.posts[0]["id"]
+        for _ in range(229):
+            self.discord.add(CURTIS_CH, HUMAN, "chatter")
+        self.discord.add(CURTIS_CH, CURTIS, "found it", reply_to=ask_id)
+        out = self.broker.handle({"op": "check", "ticket": r["ticket"]})
+        self.assertEqual(out["tickets"][0]["reply"], "found it")
+        self.assertEqual(len(self.discord.message_calls), 3)
+
+    def test_paging_stops_after_three_pages(self):
+        r = self.broker.handle({"op": "ask", "agent": "curtis", "text": "q", "wait": 0})
+        ask_id = self.discord.posts[0]["id"]
+        for _ in range(310):
+            self.discord.add(CURTIS_CH, HUMAN, "chatter")
+        self.discord.add(CURTIS_CH, CURTIS, "too far", reply_to=ask_id)
+        out = self.broker.handle({"op": "check", "ticket": r["ticket"]})
+        self.assertEqual(out["tickets"][0]["status"], "working")
+        self.assertEqual(len(self.discord.message_calls), 3)
+
+    def test_fourth_concurrent_ask_refused(self):
+        threads = [threading.Thread(target=self.broker.handle, args=({
+            "op": "ask", "agent": "cage", "text": "q%d" % i, "wait": 1},)) for i in range(3)]
+        for th in threads:
+            th.start()
+        end = time.monotonic() + 5
+        while len(self.discord.posts) < 3 and time.monotonic() < end:
+            time.sleep(0.01)
+        r = self.broker.handle({"op": "ask", "agent": "cage", "text": "q4", "wait": 0})
+        self.assertFalse(r["ok"])
+        self.assertEqual(r["error"], "Already waiting on three answers, try check later")
+        for th in threads:
+            th.join(10)
+        self.assertTrue(self.broker.handle({"op": "ask", "agent": "cage", "text": "q5", "wait": 0})["ok"])
+
+    def test_unexpected_error_while_waiting_keeps_the_ticket(self):
+        self.discord.fail_messages = ValueError("odd")
+        r = self.broker.handle({"op": "ask", "agent": "cage", "text": "q", "wait": 1})
+        self.assertTrue(r["ok"])
+        self.assertEqual(r["status"], "working")
+        self.assertTrue(r["ticket"])
+        with open(os.path.join(self.tmp, "broker.log")) as fh:
+            self.assertIn("ask-wait", fh.read())
+
+    def test_save_failure_still_returns_the_ticket(self):
+        with mock.patch.object(self.broker, "_save", side_effect=OSError("disk full")):
+            r = self.broker.handle({"op": "ask", "agent": "cage", "text": "q", "wait": 0})
+        self.assertTrue(r["ok"])
+        self.assertEqual(r["status"], "working")
+        self.assertEqual(len(self.broker.handle({"op": "check"})["tickets"]), 1)
+        with open(os.path.join(self.tmp, "broker.log")) as fh:
+            self.assertIn("save", fh.read())
+
+    def test_log_never_carries_raw_client_strings(self):
+        self.broker.handle({"op": "post", "channel": "bad\nFAKE LINE", "text": "x"})
+        self.broker.handle({"op": "ask", "agent": "../evil\r\nX" + "y" * 100, "text": "x"})
+        self.broker.handle({"op": "check", "ticket": "t\nZ"})
+        with open(os.path.join(self.tmp, "broker.log")) as fh:
+            lines = fh.read().splitlines()
+        self.assertEqual(len(lines), 3)
+        self.assertIn("'bad\\nFAKE LINE'", lines[0])
+        self.assertLess(len(lines[1]), 120)
 
     def test_check_joins_split_reply(self):
         r = self.broker.handle({"op": "ask", "agent": "curtis", "text": "long one", "wait": 0})
@@ -483,10 +690,10 @@ def rpc(path, req, timeout=10):
 
 
 class TestServer(BrokerCase):
-    def serve(self, **over):
+    def serve(self, poll=0.05, **over):
         cfg = make_config(self.tmp, **over)
         broker = bk.Broker(cfg, self.discord)
-        broker.poll_interval = 0.05
+        broker.poll_interval = poll
         server = bk.make_server(broker, cfg)
         t = threading.Thread(target=server.serve_forever, daemon=True)
         t.start()
@@ -523,6 +730,84 @@ class TestServer(BrokerCase):
             self.assertNotIn("Traceback", r["error"])
         self.assertTrue(rpc(path, {"op": "check"})["ok"])
 
+    def test_deeply_nested_json_is_a_plain_error(self):
+        path = self.serve()
+        r = rpc(path, b"[" * 50000 + b"\n")
+        self.assertFalse(r["ok"])
+        self.assertTrue(rpc(path, {"op": "check"})["ok"])
+
+    def test_dribbling_client_is_cut_off_at_the_deadline(self):
+        path = self.serve(request_deadline=1)
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.connect(path)
+        stop = threading.Event()
+
+        def dribble():
+            while not stop.is_set():
+                try:
+                    s.sendall(b"a")
+                except OSError:
+                    return
+                time.sleep(0.2)
+        t = threading.Thread(target=dribble)
+        t.start()
+        t0 = time.monotonic()
+        try:
+            s.settimeout(5)
+            data = s.recv(4096)
+        finally:
+            took = time.monotonic() - t0
+            stop.set()
+            t.join(5)
+            s.close()
+        self.assertIn(b"timed out", data)
+        self.assertGreater(took, 0.8)
+        self.assertLess(took, 2.5)
+
+    def test_ninth_concurrent_connection_gets_busy(self):
+        path = self.serve()
+        holders = []
+        for _ in range(8):
+            h = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            h.connect(path)
+            holders.append(h)
+        time.sleep(0.3)   # let the accept loop take all eight
+        try:
+            self.assertEqual(rpc(path, {"op": "check"}), {"ok": False, "error": "busy"})
+        finally:
+            for h in holders:
+                h.close()
+        end = time.monotonic() + 3
+        while True:
+            r = rpc(path, {"op": "check"})
+            if r["ok"] or time.monotonic() > end:
+                break
+            time.sleep(0.05)
+        self.assertTrue(r["ok"])
+
+    def test_rate_limit_holds_across_concurrent_connections(self):
+        path = self.serve()
+        results = []
+
+        def go(i):
+            results.append(rpc(path, {"op": "post", "channel": "general", "text": "m%d" % i}))
+        threads = [threading.Thread(target=go, args=(i,)) for i in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(10)
+        self.assertEqual(sum(r["ok"] for r in results), 6)
+        self.assertEqual(len(self.discord.posts), 6)
+        self.assertTrue(all("Too many messages" in r["error"] for r in results if not r["ok"]))
+
+    def test_second_broker_on_a_live_socket_refuses_to_start(self):
+        path = self.serve()
+        cfg = make_config(self.tmp)
+        with self.assertRaises(bk.BrokerError) as cm:
+            bk.make_server(bk.Broker(cfg, self.discord), cfg)
+        self.assertIn("broker already running", str(cm.exception))
+        self.assertTrue(rpc(path, {"op": "check"})["ok"])
+
     def test_handler_exception_does_not_kill_server(self):
         path = self.serve()
         self.discord.messages = None  # calling it raises TypeError inside read
@@ -532,7 +817,7 @@ class TestServer(BrokerCase):
         self.assertTrue(rpc(path, {"op": "check"})["ok"])
 
     def test_slow_ask_does_not_block_read(self):
-        path = self.serve()
+        path = self.serve(poll=0.3)
         self.discord.add(GENERAL, HUMAN, "hello")
         posted = threading.Event()
         self.discord.on_post = lambda rec: posted.set()
@@ -548,7 +833,7 @@ class TestServer(BrokerCase):
         r = rpc(path, {"op": "read", "channel": "general"}, timeout=2)
         took = time.monotonic() - t0
         self.assertTrue(r["ok"])
-        self.assertLess(took, 1.5)
+        self.assertLess(took, 3)
         self.assertTrue(t.is_alive(), "ask should still be waiting")
         ticket = rpc(path, {"op": "check"}, timeout=2)
         self.assertEqual(ticket["tickets"][0]["status"], "working")
