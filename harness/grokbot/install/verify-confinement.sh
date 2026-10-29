@@ -66,19 +66,30 @@ have() { command -v "$1" >/dev/null 2>&1; }
 
 # Positive control. Every negative check below proves nothing unless the
 # commands really run as the agent, so stop dead if they do not.
-got=$(as_agent id -un 2>&1)
+for tool in find timeout; do
+    if ! have "$tool"; then
+        echo "FAIL $tool not installed, no check below can be trusted"
+        exit 2
+    fi
+done
+got=$(as_agent timeout 10 id -un 2>&1)
 if [ "$got" != "$AGENT" ]; then
     echo "FAIL running as $AGENT (got: ${got:-nothing})"
     exit 2
 fi
 pass "running as $AGENT"
 
+# cant_trust RC: true for the exit statuses that mean the command never really
+# ran (124 timed out; 125, 126, 127 from timeout/exec). Those are never a pass.
+cant_trust() { [ "$1" -eq 124 ] || { [ "$1" -ge 125 ] && [ "$1" -le 127 ]; }; }
+why() { if [ "$1" -eq 124 ]; then echo "timed out"; else echo "could not run"; fi; }
+
 # expect_rc NAME RC EXPECT: pass when the command's exit status is 0 (expect=ok)
-# or nonzero (expect=refused). A timeout (124) is never a pass.
+# or nonzero (expect=refused).
 expect_rc() {
     local name=$1 rc=$2 want=$3
-    if [ "$rc" -eq 124 ]; then
-        fail "$name" "timed out"
+    if cant_trust "$rc"; then
+        fail "$name" "$(why "$rc")"
     elif [ "$want" = ok ]; then
         if [ "$rc" -eq 0 ]; then pass "$name"; else fail "$name" "exit $rc"; fi
     else
@@ -88,25 +99,42 @@ expect_rc() {
 
 # --- files ---------------------------------------------------------------
 
-# No -xdev: /home, /opt and /var are often separate mounts. The pruned trees
-# are system trees or the agent's own home.
-out=$(as_agent timeout 300 find / \
-    \( -path /proc -o -path /sys -o -path /dev -o -path /run -o -path /usr \
-       -o -path /snap -o -path /etc/ssl -o -path /etc/ca-certificates \
-       -o -path /var/lib/docker -o -path "/home/$AGENT" \) -prune -o \
-    -readable \
-    \( -name '*.env' -o -name '.env*' -o -name '*.key' -o -name '*.pem' \
-       -o -name 'token*' -o -name 'access.json' \) \
-    -not -path '*/node_modules/*' -not -path '*/site-packages/*' \
-    -not -path '*/dist-packages/*' -print 2>/dev/null)
-rc=$?
-hits=$(printf '%s\n' "$out" | head -5 | sed '/^$/d')
-if [ "$rc" -eq 124 ]; then
-    fail "no readable secret-named files outside its home" "timed out"
-elif [ -z "$hits" ]; then
-    pass "no readable secret-named files outside its home"
+# secret_find START: the secret-name search as the agent. No -xdev: /home, /opt
+# and /var are often separate mounts. The pruned trees are system trees or the
+# agent's own home.
+secret_find() {
+    as_agent timeout 300 find "$1" \
+        \( -path /proc -o -path /sys -o -path /dev -o -path /run -o -path /usr \
+           -o -path /snap -o -path /etc/ssl -o -path /etc/ca-certificates \
+           -o -path /var/lib/docker -o -path "/home/$AGENT" \) -prune -o \
+        -readable \
+        \( -name '*.env' -o -name '.env*' -o -name '*.key' -o -name '*.pem' \
+           -o -name 'token*' -o -name 'access.json' \) \
+        -not -path '*/node_modules/*' -not -path '*/site-packages/*' \
+        -not -path '*/dist-packages/*' -print 2>/dev/null
+}
+
+# Canary: the same expression, started at a file the agent owns, must print
+# it. That proves the expression matches and the uid can really run find.
+CANARY=/home/$AGENT/.verify-canary.env
+trap 'rm -f "$CANARY"' EXIT
+name="no readable secret-named files outside its home"
+if install -m 0600 -o "$AGENT" -g "$AGENT" /dev/null "$CANARY" 2>/dev/null \
+        && [ "$(secret_find "$CANARY")" = "$CANARY" ]; then
+    out=$(secret_find /)
+    rc=$?
+    rm -f "$CANARY"
+    hits=$(printf '%s\n' "$out" | head -5 | sed '/^$/d')
+    if cant_trust "$rc"; then
+        fail "$name" "$(why "$rc")"
+    elif [ -z "$hits" ]; then
+        pass "$name"
+    else
+        fail "$name" "$(echo "$hits" | tr '\n' ' ')"
+    fi
 else
-    fail "no readable secret-named files outside its home" "$(echo "$hits" | tr '\n' ' ')"
+    rm -f "$CANARY"
+    fail "find canary not seen" "secret search skipped"
 fi
 
 for d in $PRIVATE_DIRS; do
@@ -117,7 +145,7 @@ for d in $PRIVATE_DIRS; do
     fi
     first=$(as_agent timeout 120 find "$d" -readable -print -quit 2>/dev/null)
     rc=$?
-    if [ "$rc" -eq 124 ]; then fail "$name" "timed out"
+    if cant_trust "$rc"; then fail "$name" "$(why "$rc")"
     elif [ -z "$first" ]; then pass "$name"
     else fail "$name" "reads $first"; fi
 done
@@ -137,10 +165,14 @@ else
     fail "cannot read broker token" "$BROKER_ETC/token missing, confinement unproven"
 fi
 
-as_agent timeout 30 ls "$BROKER_ETC" >/dev/null 2>&1
-expect_rc "cannot list $BROKER_ETC" "$?" refused
-as_agent timeout 30 ls "$BROKER_STATE" >/dev/null 2>&1
-expect_rc "cannot list $BROKER_STATE" "$?" refused
+for d in "$BROKER_ETC" "$BROKER_STATE"; do
+    if [ -d "$d" ]; then
+        as_agent timeout 30 ls "$d" >/dev/null 2>&1
+        expect_rc "cannot list $d" "$?" refused
+    else
+        skip "cannot list $d" "not provisioned"
+    fi
+done
 
 # --- privilege and scheduling ----------------------------------------------
 
@@ -154,8 +186,8 @@ fi
 if have crontab; then
     out=$(as_agent timeout 30 crontab -l 2>&1)
     rc=$?
-    if [ "$rc" -eq 124 ]; then
-        fail "crontab refused" "timed out"
+    if cant_trust "$rc"; then
+        fail "crontab refused" "$(why "$rc")"
     elif echo "$out" | grep -qiE 'not allowed|permission'; then
         pass "crontab refused"
     else
@@ -168,8 +200,8 @@ fi
 if have at; then
     out=$(as_agent timeout 30 at -l 2>&1)
     rc=$?
-    if [ "$rc" -eq 124 ]; then
-        fail "at refused" "timed out"
+    if cant_trust "$rc"; then
+        fail "at refused" "$(why "$rc")"
     elif echo "$out" | grep -qiE 'not allowed|permission'; then
         pass "at refused"
     else
@@ -225,29 +257,19 @@ else
     pass "no lingering"
 fi
 
-if have python3; then
-    as_agent timeout 10 python3 -I -c '
-import socket, sys
-s = socket.socket(socket.AF_UNIX)
-try:
-    s.connect("/var/run/docker.sock")
-except OSError:
-    sys.exit(1)
-' >/dev/null 2>&1
-    expect_rc "cannot connect docker.sock" "$?" refused
-else
-    skip "cannot connect docker.sock" "python3 not installed"
-fi
-
-# --- network ---------------------------------------------------------------
-
-# probe HOST PORT: prints blocked, open, refused or error:<Name>.
+# probe_agent HOST PORT / probe_agent unix PATH: connect() classifier. Prints
+# blocked, open, refused or error:<Name>.
 PROBE='
 import socket, sys
-s = socket.socket()
+if sys.argv[1] == "unix":
+    s = socket.socket(socket.AF_UNIX)
+    target = sys.argv[2]
+else:
+    s = socket.socket()
+    target = (sys.argv[1], int(sys.argv[2]))
 s.settimeout(5)
 try:
-    s.connect((sys.argv[1], int(sys.argv[2])))
+    s.connect(target)
 except PermissionError:
     print("blocked")
 except (TimeoutError, socket.timeout):
@@ -261,6 +283,22 @@ else:
 '
 probe_agent() { as_agent timeout 6 python3 -I -c "$PROBE" "$1" "$2" 2>/dev/null; }
 probe_root() { timeout 6 python3 -I -c "$PROBE" "$1" "$2" 2>/dev/null; }
+
+DOCKER_SOCK=/var/run/docker.sock
+if [ ! -S "$DOCKER_SOCK" ]; then
+    skip "cannot connect docker.sock" "no docker socket"
+elif have python3; then
+    got=$(probe_agent unix "$DOCKER_SOCK")
+    if [ "$got" = blocked ]; then
+        pass "cannot connect docker.sock"
+    else
+        fail "cannot connect docker.sock" "probe says ${got:-nothing (timed out?)}"
+    fi
+else
+    skip "cannot connect docker.sock" "python3 not installed"
+fi
+
+# --- network ---------------------------------------------------------------
 
 # expect_blocked NAME HOST PORT
 expect_blocked() {
