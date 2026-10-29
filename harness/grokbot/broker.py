@@ -257,6 +257,11 @@ def reply_messages(messages, ask_msg_id, expected_authors):
     other_follows is True when a message from a different author comes right
     after the last chunk, which means the reply is finished. No reply is
     ([], False).
+
+    Any later message from an expected author that is itself threaded to the
+    ask is part of the reply too ("on it", someone else talks, then the
+    result). The watcher holds those back while the ticket is working, so
+    leaving one out here would lose it.
     """
     ordered = sorted(messages, key=_id_key)
     ask = str(ask_msg_id)
@@ -286,6 +291,10 @@ def reply_messages(messages, ask_msg_id, expected_authors):
         if ref(m) not in (None, ask):
             break
         run.append(m)
+    seen = {m.get("id") for m in run}
+    for m in ordered[start + 1:]:
+        if m.get("id") not in seen and ref(m) == ask and author(m) in expected:
+            run.append(m)
     return run, other_follows
 
 

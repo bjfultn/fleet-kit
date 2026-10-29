@@ -602,6 +602,21 @@ class TestAsk(BrokerCase):
         self.assertEqual(got, ["one", "two"])
         self.assertEqual(bk.collect_reply(msgs, "9", {CURTIS}), [])
 
+    def test_later_threaded_reply_from_expected_author_is_kept(self):
+        # "on it", someone else talks, then the result threaded to the ask:
+        # the watcher held the result back, so the broker must take it.
+        msgs = [
+            {"id": "2", "content": "on it", "author": {"id": CURTIS},
+             "message_reference": {"message_id": "1"}},
+            {"id": "3", "content": "interloper", "author": {"id": HUMAN}},
+            {"id": "4", "content": "result", "author": {"id": CURTIS},
+             "message_reference": {"message_id": "1"}},
+            {"id": "5", "content": "unthreaded", "author": {"id": CURTIS}},
+        ]
+        run, other_follows = bk.reply_messages(list(reversed(msgs)), "1", {CURTIS})
+        self.assertEqual([m["id"] for m in run], ["2", "4"])
+        self.assertTrue(other_follows)
+
     def test_continuation_stops_at_another_threaded_reply(self):
         msgs = [
             {"id": "2", "content": "one", "author": {"id": CURTIS},

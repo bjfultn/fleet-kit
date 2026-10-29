@@ -8,6 +8,7 @@ hand-written ticket JSON, so a change to either side's schema breaks here.
 import os
 import sys
 import tempfile
+import time
 import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -28,7 +29,7 @@ class ContractTests(unittest.TestCase):
         td = tempfile.TemporaryDirectory()
         self.addCleanup(td.cleanup)
         self.tmp = td.name
-        self.now = 1_800_000_000.0
+        self.now = float(int(time.time()))
         self.discord = FakeDiscord(clock=lambda: self.now)
         self.broker = bk.Broker(make_config(self.tmp), self.discord, clock=lambda: self.now)
         self.broker.sleep = lambda s: None

@@ -25,7 +25,7 @@ fi
 private_lines=
 for path in "$@"; do
     # Absolute, no whitespace or shell/systemd specials: it goes into a unit file.
-    if ! [[ $path =~ ^/[A-Za-z0-9._/+@-]*$ ]] || [ "$path" = / ]; then
+    if ! [[ $path =~ ^/[A-Za-z0-9._/+@-]*$ ]] || [[ $path =~ ^/+$ ]]; then
         echo "render: PRIVATE_PATH must be an absolute path of plain characters: $path" >&2
         exit 2
     fi

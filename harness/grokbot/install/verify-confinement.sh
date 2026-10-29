@@ -211,7 +211,7 @@ if [ ! -e "$TICKETS" ]; then
 elif [ -z "$OPERATOR" ]; then
     skip "operator can read tickets.json" "not started with sudo, no operator to run as"
 else
-    setpriv --reuid="$OPERATOR" --regid="$OPERATOR" --init-groups --reset-env \
+    setpriv --reuid="$OPERATOR" --regid="$(id -g "$OPERATOR")" --init-groups --reset-env \
         timeout 30 cat "$TICKETS" >/dev/null 2>&1
     expect_rc "operator ($OPERATOR) can read tickets.json" "$?" ok
 fi
@@ -500,6 +500,12 @@ if [ "$APP" -eq 1 ]; then
         fail "app unit running" "$AGENT-app.service has no MainPID"
     else
         pass "app unit running (pid $pid)"
+        # The cgroup-level bind and address filters (the network checks above
+        # only exercise the nft layer, outside this unit's cgroup).
+        for prop in SocketBindDeny IPAddressDeny; do
+            val=$(systemctl show -p "$prop" --value "$AGENT-app.service" 2>/dev/null)
+            if [ -n "$val" ]; then pass "app unit sets $prop"; else fail "app unit sets $prop" "empty"; fi
+        done
         ns() { nsenter -t "$pid" -m -S "$AGENT_UID" -G "$AGENT_GID" -- "$@"; }
         # Positive control for the nsenter wrapper, as above.
         got=$(ns id -un 2>&1)
