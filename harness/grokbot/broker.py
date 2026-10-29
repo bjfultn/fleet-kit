@@ -10,6 +10,7 @@ unix socket instead. One JSON line in, one JSON line out, per connection:
     check  {ticket?}                       -> {ok, tickets: [...], omitted?}
     read   {channel, n?}                   -> {ok, messages: [...]}
     react  {channel, message_id, emoji}    -> {ok}
+    brief  {}                              -> {ok, text}
 
 Anything else, or any failure, is {"ok": false, "error": "plain sentence"}.
 
@@ -63,6 +64,7 @@ MAX_WAIT = 120
 POLL_BACKOFF = (3.0, 6.0, 10.0)   # seconds between an ask's polls; the last repeats
 READ_DEFAULT = 20
 READ_MAX = 50
+BRIEF_MAX = 16 * 1024       # bytes of the operator's team brief served per request
 SETTLE_SECONDS = 4          # a reply's last chunk must be this old to count as complete
 PAGE = 100                  # messages per after= fetch
 MAX_PAGES = 3
@@ -525,6 +527,8 @@ class Broker:
         """What to log for the request's subject: a resolved name, never raw input."""
         def clip(v):
             return repr(v)[:40]
+        if op == "brief":
+            return "-"
         if op in ("post", "reply", "read", "react"):
             try:
                 return self._channel(req.get("channel"))[0]
@@ -570,10 +574,10 @@ class Broker:
         op = request.get("op")
         fn = {"post": self._op_post, "reply": self._op_reply, "ask": self._op_ask,
               "check": self._op_check, "read": self._op_read,
-              "react": self._op_react}.get(op)
+              "react": self._op_react, "brief": self._op_brief}.get(op)
         if fn is None:
             self._log("unknown", "-", 0, False)
-            return {"ok": False, "error": "Unknown op. Choices: ask, check, post, react, read, reply."}
+            return {"ok": False, "error": "Unknown op. Choices: ask, brief, check, post, react, read, reply."}
         target = self._log_target(op, request)
         length = len(request["text"]) if isinstance(request.get("text"), str) else 0
         try:
@@ -620,6 +624,24 @@ class Broker:
         self._reserve_rate()
         self.discord.react(channel_id, mid, emoji)
         return {}
+
+    def _op_brief(self, req):
+        """The operator's hand-written team brief, read fresh on every request so
+        an edit needs no restart. No Discord call, so no rate slot."""
+        path = self.cfg.get("brief_file")
+        if not isinstance(path, str) or not path:
+            raise BrokerError("No team brief is set up yet.")
+        try:
+            with open(path, "rb") as fh:
+                data = fh.read(BRIEF_MAX + 1)
+            if len(data) <= BRIEF_MAX:
+                return {"text": data.decode("utf-8")}
+            cut = data.rfind(b"\n")          # data holds BRIEF_MAX + 1 bytes
+            data = data[:cut] if cut >= 0 else data[:BRIEF_MAX]
+            return {"text": data.decode("utf-8", errors="ignore") + "\n(brief truncated)"}
+        except (OSError, ValueError) as exc:  # UnicodeDecodeError is a ValueError
+            self._log("brief-read", "-", 0, False, note=type(exc).__name__)
+            raise BrokerError("The team brief isn't readable right now.") from None
 
     def _ask_target(self, name):
         key = str(name or "").strip().lower()

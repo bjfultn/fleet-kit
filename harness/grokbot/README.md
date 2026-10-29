@@ -17,6 +17,12 @@ the design assumes that uid is hostile and confines it.
   (the app unit sets it to `/run/AGENT-broker/team.sock`).
   `team react CHANNEL MESSAGE_ID EMOJI` adds one emoji reaction to a message in
   an allowed channel; it counts against the same per-minute budget as a post.
+  `team read CHANNEL [N] --ids` puts each message's id in front of its line, so
+  the agent can react to or reply to what it found.
+  `team brief` prints the operator's team brief. The optional config key
+  `brief_file` names a plain text file (read on every call, first 16 KiB) that
+  the operator writes by hand with who is on the team and the house rules; the
+  agent can read all of it, so it must contain nothing secret.
 - `../../bin/grokbot_wake.py`: the watcher, run by the operator, that wakes the
   agent when it is mentioned. It reads the broker's `tickets.json`.
 - `install/`: templates for systemd units and an nftables policy, `render.sh`

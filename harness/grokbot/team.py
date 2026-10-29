@@ -9,8 +9,9 @@ voice assistant, so it is plain text and short.
     team reply <channel> <message-id> <text...>
     team ask <agent|team> <text...> [--wait N]
     team check [ticket]
-    team read <channel> [n]
+    team read <channel> [n] [--ids]
     team react <channel> <message-id> <emoji>
+    team brief
 
 The socket is $TEAM_SOCKET, or /run/grokbot-broker/team.sock.
 
@@ -93,6 +94,8 @@ def _build(args):
     if op == "react":
         return ({"op": "react", "channel": args.channel, "message_id": args.message_id,
                  "emoji": args.emoji}, OP_TIMEOUT)
+    if op == "brief":
+        return {"op": "brief"}, OP_TIMEOUT
     if op == "ask":
         return ({"op": "ask", "agent": args.agent, "text": _text(args.text),
                  "wait": args.wait}, ask_timeout(args.wait))
@@ -204,11 +207,14 @@ def _parser():
     p = sub.add_parser("read", help="read recent messages in a channel")
     p.add_argument("channel")
     p.add_argument("n", nargs="?", type=int)
+    p.add_argument("--ids", action="store_true", help="show each message's id")
 
     p = sub.add_parser("react", help="react to a message with an emoji")
     p.add_argument("channel")
     p.add_argument("message_id")
     p.add_argument("emoji")
+
+    sub.add_parser("brief", help="read the team brief: who is on the team, house rules")
 
     return ap
 
@@ -242,20 +248,23 @@ def _format_check(rows, omitted=0):
     return "\n".join(lines)
 
 
-def _format_read(messages):
+def _format_read(messages, ids=False):
     if not messages:
         return "No messages."
-    return "\n".join("%s: %s" % (m.get("author"), (m.get("text") or "").replace("\n", " "))
+    return "\n".join("%s%s: %s" % ("[%s] " % m.get("id") if ids else "", m.get("author"),
+                                  (m.get("text") or "").replace("\n", " "))
                      for m in messages)
 
 
-def _format_ok(op, resp):
+def _format_ok(op, resp, ids=False):
     if op == "ask":
         return _format_ask(resp)
     if op == "check":
         return _format_check(resp.get("tickets") or [], resp.get("omitted") or 0)
     if op == "read":
-        return _format_read(resp.get("messages") or [])
+        return _format_read(resp.get("messages") or [], ids)
+    if op == "brief":
+        return (resp.get("text") or "The team brief is empty.").rstrip("\n")
     if op == "react":
         return "Reacted."
     return "Sent."
@@ -290,7 +299,7 @@ def main(argv, connect=None):
             return _fail(BUSY)
         return _fail("team: %s" % error)
 
-    print(_format_ok(args.op, resp))
+    print(_format_ok(args.op, resp, getattr(args, "ids", False)))
     return 0
 
 

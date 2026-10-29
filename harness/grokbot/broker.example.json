@@ -19,6 +19,7 @@
   "socket": "/run/__AGENT__-broker/team.sock",
   "socket_group": "__AGENT__",
   "state_dir": "/var/lib/__AGENT__-broker",
+  "brief_file": "/etc/__AGENT__-broker/brief.md",
   "rate_per_minute": 6,
   "max_len": 1800,
   "ask_wait": 60,

@@ -354,7 +354,110 @@ class TestReact(BrokerCase):
 
     def test_unknown_op_lists_react(self):
         r = self.broker.handle({"op": "dance"})
-        self.assertEqual(r["error"], "Unknown op. Choices: ask, check, post, react, read, reply.")
+        self.assertEqual(r["error"], "Unknown op. Choices: ask, brief, check, post, react, read, reply.")
+
+
+class TestBrief(BrokerCase):
+    def setUp(self):
+        super().setUp()
+        self.path = os.path.join(self.tmp, "brief.md")
+
+    def write(self, data):
+        with open(self.path, "wb") as fh:
+            fh.write(data if isinstance(data, bytes) else data.encode("utf-8"))
+
+    def brief(self, broker=None):
+        return (broker or self.broker).handle({"op": "brief"})
+
+    def log_text(self):
+        with open(os.path.join(self.tmp, "broker.log")) as fh:
+            return fh.read()
+
+    def test_returns_the_file_text(self):
+        self.write("Team: sonnet routes.\nRule: be brief \N{EM DASH} always.\n")
+        b = self.make(brief_file=self.path)
+        self.assertEqual(self.brief(b), {"ok": True,
+                                         "text": "Team: sonnet routes.\nRule: be brief \N{EM DASH} always.\n"})
+
+    def test_reads_the_file_fresh_on_every_request(self):
+        b = self.make(brief_file=self.path)
+        self.write("first")
+        self.assertEqual(self.brief(b)["text"], "first")
+        self.write("second")
+        self.assertEqual(self.brief(b)["text"], "second")
+
+    def test_unset_key_says_no_brief(self):
+        r = self.brief()
+        self.assertEqual(r, {"ok": False, "error": "No team brief is set up yet."})
+        for empty in ("", None):
+            b = self.make(brief_file=empty)
+            self.assertEqual(self.brief(b)["error"], "No team brief is set up yet.")
+
+    def test_missing_file_is_a_plain_error_without_path_or_os_text(self):
+        b = self.make(brief_file=self.path)
+        r = self.brief(b)
+        self.assertEqual(r, {"ok": False, "error": "The team brief isn't readable right now."})
+        self.assertNotIn(self.tmp, str(r))
+        self.assertNotIn("No such file", str(r))
+        log = self.log_text()
+        self.assertIn("brief-read - len=0 error FileNotFoundError", log)
+        self.assertNotIn(self.tmp + "/brief", log)
+        self.assertNotIn("No such file", log)
+
+    def test_directory_and_bad_utf8_are_unreadable(self):
+        b = self.make(brief_file=self.tmp)
+        self.assertEqual(self.brief(b)["error"], "The team brief isn't readable right now.")
+        self.write(b"caf\xe9 not utf-8\n")
+        b = self.make(brief_file=self.path)
+        r = self.brief(b)
+        self.assertEqual(r["error"], "The team brief isn't readable right now.")
+        self.assertIn("UnicodeDecodeError", self.log_text())
+
+    def test_file_of_exactly_the_cap_is_returned_whole(self):
+        self.write(b"x" * bk.BRIEF_MAX)
+        r = self.brief(self.make(brief_file=self.path))
+        self.assertEqual(r["text"], "x" * bk.BRIEF_MAX)
+
+    def test_oversize_file_is_cut_at_a_line_boundary_with_a_marker(self):
+        lines = ["line %04d" % i for i in range(3000)]        # 10 bytes a line with newline
+        self.write("\n".join(lines) + "\n")
+        r = self.brief(self.make(brief_file=self.path))
+        self.assertTrue(r["ok"])
+        text = r["text"]
+        self.assertTrue(text.endswith("\n(brief truncated)"))
+        kept = text[:-len("\n(brief truncated)")].split("\n")
+        self.assertLessEqual(len("\n".join(kept)), bk.BRIEF_MAX)
+        self.assertEqual(kept, lines[:len(kept)])                # whole lines only
+        self.assertGreater(len(kept), 1000)
+
+    def test_oversize_cut_never_splits_a_multibyte_character(self):
+        self.write("\N{THUMBS UP SIGN}" * 5000)                  # one long line, 4 bytes each
+        r = self.brief(self.make(brief_file=self.path))
+        self.assertTrue(r["ok"])
+        body = r["text"][:-len("\n(brief truncated)")]
+        self.assertTrue(r["text"].endswith("(brief truncated)"))
+        self.assertLessEqual(len(body.encode("utf-8")), bk.BRIEF_MAX)
+        self.assertEqual(set(body), {"\N{THUMBS UP SIGN}"})
+
+    def test_brief_spends_no_rate_or_lookup_budget_and_calls_no_discord(self):
+        self.write("hello")
+        b = self.make(brief_file=self.path)
+        for _ in range(20):
+            self.assertTrue(self.brief(b)["ok"])
+        self.assertTrue(b.handle({"op": "post", "channel": "general", "text": "x"})["ok"])
+        self.assertEqual(self.discord.message_calls, [])
+        self.assertEqual(len(self.discord.posts), 1)
+
+    def test_brief_logs_a_dash_target_and_never_the_text(self):
+        self.write("secretish words")
+        self.brief(self.make(brief_file=self.path))
+        log = self.log_text()
+        self.assertIn(" brief - len=0 ok", log)
+        self.assertNotIn("secretish", log)
+
+    def test_unknown_op_lists_brief(self):
+        r = self.broker.handle({"op": "dance"})
+        self.assertIn("ask, brief, check", r["error"])
 
 
 class TestAsk(BrokerCase):
@@ -859,6 +962,14 @@ class TestRead(BrokerCase):
         self.assertEqual(second["reply_to"], "5")
         self.assertIsNone(first["reply_to"])
         self.assertEqual(set(first), {"id", "author", "text", "ts", "reply_to"})
+
+    def test_read_returns_the_id_that_reply_and_react_accept(self):
+        self.discord.add(GENERAL, HUMAN, "hello")
+        mid = self.broker.handle({"op": "read", "channel": "general"})["messages"][0]["id"]
+        self.assertTrue(mid.isdigit())
+        self.assertTrue(self.broker.handle({"op": "react", "channel": "general",
+                                            "message_id": mid, "emoji": "\N{THUMBS UP SIGN}"})["ok"])
+        self.assertEqual(self.discord.reactions[0]["message_id"], mid)
 
     def test_read_rejects_unlisted_channel_and_caps_n(self):
         self.assertFalse(self.broker.handle({"op": "read", "channel": "nope"})["ok"])

@@ -157,6 +157,51 @@ class TeamTests(unittest.TestCase):
         self.assertEqual((code, out), (0, "No messages.\n"))
         self.assertEqual(fake.calls[0][0], {"op": "read", "channel": "general", "n": 5})
 
+    def test_read_ids_puts_the_id_in_front_of_each_line(self):
+        fake = FakeBroker({"ok": True, "messages": [
+            {"id": "11", "author": "Sonnet", "text": "hi", "ts": "", "reply_to": None},
+            {"id": "12", "author": "Curtis", "text": "second\nline", "ts": "", "reply_to": None},
+        ]})
+        code, out, err = run(["read", "general", "--ids"], fake)
+        self.assertEqual((code, out, err), (0, "[11] Sonnet: hi\n[12] Curtis: second line\n", ""))
+        self.assertEqual(fake.calls[0][0], {"op": "read", "channel": "general"})
+
+    def test_read_ids_works_with_a_count_in_either_order(self):
+        for argv in (["read", "general", "5", "--ids"], ["read", "general", "--ids", "5"],
+                     ["read", "--ids", "general", "5"]):
+            fake = FakeBroker({"ok": True, "messages": [
+                {"id": "7", "author": "Sonnet", "text": "yo"}]})
+            code, out, _ = run(argv, fake)
+            self.assertEqual((code, out), (0, "[7] Sonnet: yo\n"), argv)
+            self.assertEqual(fake.calls[0][0], {"op": "read", "channel": "general", "n": 5})
+
+    def test_read_ids_with_no_messages_is_unchanged(self):
+        code, out, _ = run(["read", "general", "--ids"], FakeBroker({"ok": True, "messages": []}))
+        self.assertEqual((code, out), (0, "No messages.\n"))
+
+    def test_read_without_ids_ignores_the_id_field(self):
+        fake = FakeBroker({"ok": True, "messages": [
+            {"id": "11", "author": "Sonnet", "text": "hi"}]})
+        self.assertEqual(run(["read", "general"], fake)[1], "Sonnet: hi\n")
+
+    def test_brief_prints_the_text_as_is(self):
+        fake = FakeBroker({"ok": True, "text": "Team: sonnet routes.\n\nRule one.\n"})
+        code, out, err = run(["brief"], fake)
+        self.assertEqual((code, out, err), (0, "Team: sonnet routes.\n\nRule one.\n", ""))
+        self.assertEqual(fake.calls[0], ({"op": "brief"}, team.OP_TIMEOUT))
+
+    def test_brief_prints_the_brokers_refusal(self):
+        fake = FakeBroker({"ok": False, "error": "No team brief is set up yet."})
+        code, out, err = run(["brief"], fake)
+        self.assertEqual((code, out), (1, ""))
+        self.assertEqual(err, "team: No team brief is set up yet.\n")
+
+    def test_brief_takes_no_arguments(self):
+        fake = FakeBroker({"ok": True, "text": "x"})
+        with self.assertRaises(SystemExit), mock.patch("sys.stderr", io.StringIO()):
+            team.main(["brief", "extra"], connect=fake)
+        self.assertEqual(fake.calls, [])
+
     def test_post_joins_words(self):
         fake = FakeBroker({"ok": True, "message_id": "42"})
         code, out, err = run(["post", "general", "hello", "there"], fake)
