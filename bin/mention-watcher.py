@@ -22,6 +22,9 @@ import sys
 import time
 from datetime import datetime, timezone
 
+import grokbot_wake
+from grokbot_wake import sanitize  # shared with the grok-bot wake path
+
 # This file annotates with `X | None`, which 3.9 parses and then raises a
 # TypeError on at def time. It works today only because start-all-agents.sh
 # exports PATH with /usr/local/bin (3.14) ahead of /usr/bin (3.9.6), which is
@@ -82,78 +85,52 @@ if not os.path.isabs(AGENTS_DIR):
     AGENTS_DIR = os.path.join(FLEET_ROOT, AGENTS_DIR)
 
 
-def _load_fleet_agents() -> tuple[dict[str, str], list[str]]:
-    """Build the bot-id -> tmux-window map and the watch list from agent configs.
+def _load_fleet_agents(agents_dir: str | None = None, general_channel_id: str | None = None):
+    """Build the bot-id -> tmux-window map, the grok-bot map and the watch list.
 
-    Both used to be literal dicts maintained by hand, which meant every id
-    existed in two places: here and the agent's own config.json. They drifted,
-    and a drifted entry fails silently -- the watcher simply never wakes that
-    agent, with nothing in any log to say why. Deriving them means an agent that
-    exists on disk is an agent that gets watched.
+    The work is in grokbot_wake.load_fleet_agents, which has no import-time side
+    effects and so can be tested; this wrapper supplies the fleet's settings and
+    turns a config error into a startup exit. See there for why these are
+    derived from the agent configs rather than kept as literals.
 
-    An agent with no discord.bot_id cannot be woken (we would not recognise its
-    own messages to avoid self-wakes), so that is a hard error at startup rather
-    than a mystery at 3am.
+    Agents with `platform: "grok-bot"` are woken by webhook, not tmux, so they
+    are returned separately and never appear in the tmux map.
     """
-    agents: dict[str, str] = {}
-    channels: list[str] = []
-    missing: list[str] = []
-
-    general = str(FLEET.get("general_channel_id") or "").strip()
-    if general:
-        channels.append(general)
-
-    if not os.path.isdir(AGENTS_DIR):
-        sys.exit(f"mention-watcher: no agents directory at {AGENTS_DIR}")
-
-    for name in sorted(os.listdir(AGENTS_DIR)):
-        cfg_path = os.path.join(AGENTS_DIR, name, "config.json")
-        if not os.path.isfile(cfg_path):
-            continue
-        try:
-            with open(cfg_path) as fh:
-                cfg = json.load(fh)
-        except (OSError, ValueError) as exc:
-            sys.exit(f"mention-watcher: cannot read {cfg_path}: {exc}")
-
-        window = cfg.get("alias") or cfg.get("name", name).lower()
-        discord_cfg = cfg.get("discord", {})
-
-        bot_id = str(discord_cfg.get("bot_id") or "").strip()
-        if bot_id:
-            agents[bot_id] = window
-        else:
-            missing.append(name)
-
-        private = str(discord_cfg.get("private_channel_id") or "").strip()
-        if private and private not in channels:
-            channels.append(private)
-
-        # An agent may also name a general channel of its own; honour it so a
-        # fleet can be split across more than one shared room.
-        other = str(discord_cfg.get("general_channel_id") or "").strip()
-        if other and other not in channels:
-            channels.append(other)
-
-    if missing:
-        sys.exit(
-            "mention-watcher: these agents have no discord.bot_id in config.json: "
-            + ", ".join(missing)
-            + "\nWithout it they can never be woken by a mention. Add the bot's "
-            "application id (Discord Developer Portal -> your app -> Application ID)."
-        )
-    if not agents:
-        sys.exit(f"mention-watcher: no agents found under {AGENTS_DIR}")
-
-    return agents, channels
+    if agents_dir is None:
+        agents_dir = AGENTS_DIR
+    if general_channel_id is None:
+        general_channel_id = str(FLEET.get("general_channel_id") or "")
+    try:
+        return grokbot_wake.load_fleet_agents(agents_dir, general_channel_id)
+    except grokbot_wake.FleetConfigError as exc:
+        sys.exit(f"mention-watcher: {exc}")
 
 
-AGENTS, CHANNELS = _load_fleet_agents()
+AGENTS, GROK_AGENTS, CHANNELS = _load_fleet_agents()
+GROK_BY_ID = {a["bot_id"]: a for a in GROK_AGENTS.values()}
 
 ENFORCE = os.environ.get("MENTION_WATCHER_ENFORCE", "0") == "1"
 
 # Track the last message ID we've processed per channel
 last_seen: dict[str, str] = {}
+
+# Grok Bot agents are woken by webhook (see grokbot_wake.py), with their own
+# allowlist, ticket file and throttle. None of this touches the tmux path.
+GROK_GATE = grokbot_wake.WakeGate(
+    time.monotonic,
+    quiet_hours={alias for alias, a in GROK_AGENTS.items() if a["quiet_hours"]},
+    log=lambda m: log(m),
+)
+GROK_TICKETS = {
+    alias: grokbot_wake.TicketReader(a["tickets_file"], lambda m: log(m))
+    for alias, a in GROK_AGENTS.items()
+}
+if GROK_GATE.quiet:
+    try:
+        grokbot_wake.now_quiet_tz()
+    except Exception as _exc:  # ZoneInfoNotFoundError: no tzdata on this host
+        sys.exit(f"mention-watcher: quiet_hours needs the {grokbot_wake.QUIET_TZ} "
+                 f"timezone database ({type(_exc).__name__}); install tzdata.")
 
 # ── Access control ──────────────────────────────────────────────────────────
 # Waking an agent types text straight into a tool-capable pane, so the author of
@@ -225,12 +202,6 @@ def is_allowed(window_name: str, author_id: str, channel_id: str) -> tuple[bool,
     return False, "not in allowlist"
 
 
-# Discord's own markup we must not mangle: <@id>, <@&id>, <#id>, <:name:id>,
-# <a:name:id>, <t:stamp>. Anything else starting with "<" gets neutered so a
-# message body cannot close the <channel> tag and inject top-level text.
-_MENTION_PREFIXES = ("@", "#", ":", "t:", "a:")
-
-
 def oldest_first(messages: list) -> list:
     """Sort Discord messages oldest-first by snowflake id.
 
@@ -259,15 +230,6 @@ def attr(value: str) -> str:
         .replace('"', "&quot;")
     )
 
-
-def sanitize(content: str) -> str:
-    out = []
-    for i, ch in enumerate(content):
-        if ch == "<" and not content[i + 1:].startswith(_MENTION_PREFIXES):
-            out.append("&lt;")
-        else:
-            out.append(ch)
-    return "".join(out)
 
 # ── Discord REST API ────────────────────────────────────────────────────────
 # One keep-alive connection, not a fresh TLS handshake per request. The old
@@ -539,6 +501,55 @@ def log(msg: str):
     print(f"[{ts}] {msg}", flush=True)
 
 
+def _wake_grok_batch(alias: str, batch: list) -> None:
+    """Send one coalesced webhook body; put the batch back if it did not land."""
+    agent = GROK_AGENTS[alias]
+    key = agent["webhook_pass_key"]
+    if not key:
+        log(f"  {alias}: no grokbot.webhook_pass_key configured, cannot wake")
+        return
+    body = {"messages": batch}
+    if not grokbot_wake.wake_grokbot(alias, key, body, log, context=SSL_CTX):
+        GROK_GATE.failed(alias)
+
+
+def handle_grokbot(msg: dict, channel_id: str) -> None:
+    """Wake every Grok Bot agent this message is addressed to, if it may."""
+    if not GROK_AGENTS:
+        return
+    author = msg.get("author") or {}
+    is_bot = bool(author.get("bot"))
+    for alias, agent in GROK_AGENTS.items():
+        grokbot_wake.refresh_access(agent, log)
+        if not grokbot_wake.grokbot_targets(msg, channel_id, agent,
+                                            GROK_TICKETS[alias].ask_ids()):
+            continue
+        payload = grokbot_wake.build_payload(msg, channel_id)
+        log(f"Grok mention from {payload['author']} for {alias}: "
+            f"\"{payload['text'][:80]}\"")
+        now_local = grokbot_wake.now_quiet_tz() if alias in GROK_GATE.quiet else None
+        verdict = GROK_GATE.admit(alias, grokbot_wake.thread_id(msg), is_bot, now_local)
+        if verdict == "drop":
+            continue
+        GROK_GATE.hold(alias, payload, is_bot)
+        if verdict == "hold":
+            log(f"  {alias}: held (wake in flight or quiet hours)")
+            continue
+        batch = GROK_GATE.drain(alias, now_local, force=True)
+        if batch:
+            _wake_grok_batch(alias, batch)
+
+
+def drain_grokbot() -> None:
+    """Release anything held once the in-flight window or quiet hours end."""
+    for alias in GROK_AGENTS:
+        now_local = grokbot_wake.now_quiet_tz() if alias in GROK_GATE.quiet else None
+        batch = GROK_GATE.drain(alias, now_local)
+        if batch:
+            log(f"  {alias}: releasing {len(batch)} held message(s)")
+            _wake_grok_batch(alias, batch)
+
+
 def extract_mentioned_agents(message: dict) -> set[str]:
     """Return set of tmux window names for agents mentioned in this message."""
     targets = set()
@@ -600,6 +611,11 @@ def poll():
                 if not after or int(msg_id) > int(after or "0"):
                     last_seen[channel_id] = msg_id
 
+                try:
+                    handle_grokbot(msg, channel_id)
+                except Exception as e:
+                    log(f"Error in grok-bot handling for message {msg_id}: {e}")
+
                 targets = extract_mentioned_agents(msg)
                 if not targets:
                     # A message that tagged SOMETHING and woke nobody is the
@@ -613,6 +629,7 @@ def poll():
                     # the configs. Untagged chatter stays quiet.
                     unmatched = [m.get("id", "") for m in msg.get("mentions", [])
                                  if m.get("id") not in AGENTS
+                                 and m.get("id") not in GROK_BY_ID
                                  and m.get("id") != msg.get("author", {}).get("id", "")]
                     roles = msg.get("mention_roles", [])
                     if unmatched or roles:
@@ -656,6 +673,11 @@ def main():
 
     log("Mention watcher starting")
     log(f"Watching {len(CHANNELS)} channels for {len(AGENTS)} agents")
+    for alias, a in GROK_AGENTS.items():
+        # Counts only: the ids stay out of the log.
+        log(f"  grok-bot {alias}: webhook wake, {len(a['allowed_channels'])} channels, "
+            f"{len(a['allow_from'])} humans, {len(a['allow_bots'])} bots allowed"
+            f"{', quiet hours' if a['quiet_hours'] else ''}")
     log(f"Poll interval: {POLL_INTERVAL}s")
 
     seed_last_seen()
@@ -665,6 +687,7 @@ def main():
     while True:
         try:
             poll()
+            drain_grokbot()
             heartbeat()
         except KeyboardInterrupt:
             log("Shutting down")

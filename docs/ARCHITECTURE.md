@@ -50,6 +50,54 @@ log, then set it to 1.
 **Waking an agent types text into a tool-capable pane.** Treat the allowlist as
 a real security boundary.
 
+### Grok Bot agents
+
+An agent whose `config.json` has `"platform": "grok-bot"` is a Grok Bot hosted by
+xAI. It has no tmux pane, so the watcher wakes it by POSTing to a routine
+webhook instead (`bin/grokbot_wake.py`). It is left out of the tmux map and
+watched through its own path; Claude agents are unaffected.
+
+```json
+{
+  "platform": "grok-bot",
+  "alias": "...",
+  "discord": { "bot_id": "...", "private_channel_id": "...", "state_dir": "~/.claude/channels/discord-..." },
+  "grokbot": {
+    "webhook_pass_key": "fleet/...-webhook",
+    "tickets_file": "/var/lib/.../tickets.json",
+    "quiet_hours": true
+  }
+}
+```
+
+- **Body.** Always `{"messages": [{"channel_id", "message_id", "author",
+  "author_id", "text", "ts"}, ...]}`, a list even for one wake. Text is
+  sanitized and cut to 1500 characters.
+- **Secret.** `pass show <webhook_pass_key>`: line 1 is the https URL, line 2
+  the bearer key. A locked store logs `secret store locked` and the wake is
+  retried after the backoff below. Neither value is ever logged.
+- **Who may wake it.** Checked every time, and **not** governed by
+  `MENTION_WATCHER_ENFORCE`: the message text leaves the box, so there is no
+  dry-run mode. The allowlist is the agent's own `access.json` under
+  `discord.state_dir`, same format as the plugin's: `allowFrom` (humans),
+  `allowBots` (bots), and the keys of `groups` as the channels it may see. Only
+  the top-level lists count, not a per-group `allowFrom`. The agent's private
+  channel must be listed under `groups`. A missing or unreadable file allows
+  nobody. The file is re-read when it changes; a new channel needs a watcher
+  restart to be polled.
+- **What wakes it.** A user mention of its bot id, or any message in its private
+  channel. `@everyone`, `@here` and role tags do not. Its own messages never do,
+  and neither does a reply to one of its own asks, read from the broker's
+  `tickets_file` (`{"tickets": [{"ask_message_id": ...}]}`, read-only; missing
+  or unreadable means no asks, logged once).
+- **Throttle.** One wake in flight per agent: anything inside 120 s of the last
+  send is held and goes out together as one body. Bot-authored wakes are capped
+  at 4 per thread per hour (a thread is the replied-to message, else the message
+  itself); the rest are dropped with a log line. With `quiet_hours`, bot-authored
+  wakes are held 22:00 to 07:00 America/Denver and released together; humans are
+  never held for it. A failed POST puts the batch back and retries after the
+  same 120 s. Held queues are in memory and capped at 20 per agent.
+
 ## 3. fleet.json
 
 Fleet-wide settings the scripts read at startup.
