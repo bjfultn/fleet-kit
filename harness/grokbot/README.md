@@ -15,6 +15,8 @@ the design assumes that uid is hostile and confines it.
 - `team.py`: the CLI the agent runs, installed as `/usr/local/bin/team`. It finds
   the socket through `TEAM_SOCKET`, default `/run/grokbot-broker/team.sock`
   (the app unit sets it to `/run/AGENT-broker/team.sock`).
+  `team react CHANNEL MESSAGE_ID EMOJI` adds one emoji reaction to a message in
+  an allowed channel; it counts against the same per-minute budget as a post.
 - `../../bin/grokbot_wake.py`: the watcher, run by the operator, that wakes the
   agent when it is mentioned. It reads the broker's `tickets.json`.
 - `install/`: templates for systemd units and an nftables policy, `render.sh`

@@ -9,6 +9,7 @@ unix socket instead. One JSON line in, one JSON line out, per connection:
     ask    {agent, text, wait?}            -> {ok, ticket, status, reply}
     check  {ticket?}                       -> {ok, tickets: [...], omitted?}
     read   {channel, n?}                   -> {ok, messages: [...]}
+    react  {channel, message_id, emoji}    -> {ok}
 
 Anything else, or any failure, is {"ok": false, "error": "plain sentence"}.
 
@@ -164,6 +165,11 @@ class Discord:
             raise BrokerError("Discord sent a reply I could not read.")
         return out
 
+    def react(self, channel_id, message_id, emoji):
+        """Add the bot's own reaction. Discord answers 204 with no body."""
+        self._call("PUT", "/channels/%s/messages/%s/reactions/%s/@me"
+                   % (channel_id, message_id, urllib.parse.quote(emoji, safe="")))
+
     def messages(self, channel_id, after=None, limit=50):
         query = {"limit": int(limit)}
         if after is not None:
@@ -171,6 +177,19 @@ class Discord:
         out = self._call("GET", "/channels/%s/messages?%s"
                          % (channel_id, urllib.parse.urlencode(query)))
         return out if isinstance(out, list) else []
+
+
+EMOJI_MAX = 8               # code points: room for a ZWJ sequence, not for text
+
+
+def check_emoji(value):
+    """The emoji to react with, or a BrokerError. One short run of non-ASCII
+    characters only: no text, no custom <:name:id> emoji, no mentions."""
+    text = value.strip() if isinstance(value, str) else ""
+    if (not text or len(text) > EMOJI_MAX
+            or any(ch.isspace() or ord(ch) < 128 for ch in text)):
+        raise BrokerError("Use one emoji, like \N{THUMBS UP SIGN}.")
+    return text
 
 
 def _retry_seconds(raw, header):
@@ -506,7 +525,7 @@ class Broker:
         """What to log for the request's subject: a resolved name, never raw input."""
         def clip(v):
             return repr(v)[:40]
-        if op in ("post", "reply", "read"):
+        if op in ("post", "reply", "read", "react"):
             try:
                 return self._channel(req.get("channel"))[0]
             except BrokerError:
@@ -550,10 +569,11 @@ class Broker:
             return {"ok": False, "error": "The request must be a JSON object."}
         op = request.get("op")
         fn = {"post": self._op_post, "reply": self._op_reply, "ask": self._op_ask,
-              "check": self._op_check, "read": self._op_read}.get(op)
+              "check": self._op_check, "read": self._op_read,
+              "react": self._op_react}.get(op)
         if fn is None:
             self._log("unknown", "-", 0, False)
-            return {"ok": False, "error": "Unknown op. Choices: ask, check, post, read, reply."}
+            return {"ok": False, "error": "Unknown op. Choices: ask, check, post, react, read, reply."}
         target = self._log_target(op, request)
         length = len(request["text"]) if isinstance(request.get("text"), str) else 0
         try:
@@ -590,6 +610,16 @@ class Broker:
             raise BrokerError("A reply needs the numeric id of the message to reply to.")
         _, new_id = self._send(req.get("channel"), req.get("text"), reply_to=mid)
         return {"message_id": new_id}
+
+    def _op_react(self, req):
+        _, channel_id = self._channel(req.get("channel"))
+        mid = str(req.get("message_id") or "")
+        if not (mid.isascii() and mid.isdigit()):
+            raise BrokerError("A reaction needs the numeric id of the message to react to.")
+        emoji = check_emoji(req.get("emoji"))
+        self._reserve_rate()
+        self.discord.react(channel_id, mid, emoji)
+        return {}
 
     def _ask_target(self, name):
         key = str(name or "").strip().lower()

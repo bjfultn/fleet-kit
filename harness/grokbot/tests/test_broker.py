@@ -63,6 +63,8 @@ class FakeDiscord:
         self.clock = clock
         self.posts = []
         self.fail_post = None
+        self.reactions = []
+        self.fail_react = None
         self.fail_messages = None
         self.on_post = None
         self.on_messages = None
@@ -98,6 +100,12 @@ class FakeDiscord:
         if self.on_post:
             self.on_post(rec)
         return {"id": msg["id"]}
+
+    def react(self, channel_id, message_id, emoji):
+        if self.fail_react:
+            raise self.fail_react
+        self.reactions.append({"channel_id": channel_id, "message_id": message_id,
+                               "emoji": emoji})
 
     def messages(self, channel_id, after=None, limit=50):
         self.message_calls.append((channel_id, after, limit))
@@ -244,6 +252,109 @@ class TestPost(BrokerCase):
         r = self.broker.handle({"op": "ask", "agent": "nobody", "text": "x"})
         self.assertIn("curtis", r["error"])
         self.assertIn("team", r["error"])
+
+
+class TestReact(BrokerCase):
+    def react(self, **over):
+        req = {"op": "react", "channel": "general", "message_id": "555",
+               "emoji": "\N{THUMBS UP SIGN}"}
+        req.update(over)
+        return self.broker.handle(req)
+
+    def test_react_calls_discord_with_ids_and_emoji(self):
+        self.assertEqual(self.react(), {"ok": True})
+        self.assertEqual(self.discord.reactions, [
+            {"channel_id": GENERAL, "message_id": "555", "emoji": "\N{THUMBS UP SIGN}"}])
+        self.assertEqual(self.discord.posts, [])
+
+    def test_react_accepts_channel_id_and_strips_the_emoji(self):
+        self.assertTrue(self.react(channel=NOVA, emoji=" \N{THUMBS UP SIGN}\n")["ok"])
+        self.assertEqual(self.discord.reactions[0]["channel_id"], NOVA)
+        self.assertEqual(self.discord.reactions[0]["emoji"], "\N{THUMBS UP SIGN}")
+
+    def test_react_accepts_a_zwj_sequence_up_to_eight_code_points(self):
+        family = "\N{MAN}\u200d\N{WOMAN}\u200d\N{GIRL}\u200d\N{BOY}"   # 7 code points
+        self.assertTrue(self.react(emoji=family)["ok"])
+        self.assertTrue(self.react(emoji="\N{THUMBS UP SIGN}" * 8)["ok"])
+
+    def test_react_refuses_a_non_numeric_message_id(self):
+        for bad in ("abc", "12 3", "../x", "", None, "\u00b2", "-5", "1.5"):
+            r = self.react(message_id=bad)
+            self.assertFalse(r["ok"], bad)
+            self.assertIn("numeric id", r["error"])
+        self.assertEqual(self.discord.reactions, [])
+
+    def test_react_accepts_a_numeric_message_id_sent_as_a_number(self):
+        self.assertTrue(self.react(message_id=555)["ok"])
+        self.assertEqual(self.discord.reactions[0]["message_id"], "555")
+
+    def test_react_rejects_unlisted_channel(self):
+        for bad in ("secret", "123456", None):
+            r = self.react(channel=bad)
+            self.assertFalse(r["ok"])
+            self.assertIn("general", r["error"])
+        self.assertEqual(self.discord.reactions, [])
+
+    def test_react_refuses_anything_but_one_emoji(self):
+        for bad in ("", "  ", "ok", "\N{THUMBS UP SIGN} \N{THUMBS UP SIGN}", "<:x:1>",
+                    "\N{THUMBS UP SIGN}x", "@everyone", "1\ufe0f\u20e3", None, 5,
+                    ["\N{THUMBS UP SIGN}"], "\N{THUMBS UP SIGN}" * 9, "\N{THUMBS UP SIGN}\t\N{THUMBS UP SIGN}"):
+            r = self.react(emoji=bad)
+            self.assertFalse(r["ok"], repr(bad))
+            self.assertEqual(r["error"], "Use one emoji, like \N{THUMBS UP SIGN}.")
+        self.assertEqual(self.discord.reactions, [])
+
+    def test_react_without_an_emoji_key_is_refused(self):
+        r = self.broker.handle({"op": "react", "channel": "general", "message_id": "5"})
+        self.assertFalse(r["ok"])
+        self.assertIn("Use one emoji", r["error"])
+
+    def test_react_consumes_the_per_minute_budget(self):
+        for _ in range(6):
+            self.assertTrue(self.react()["ok"])
+        r = self.react()
+        self.assertFalse(r["ok"])
+        self.assertIn("Too many messages", r["error"])
+        self.assertEqual(len(self.discord.reactions), 6)
+        self.now += 61
+        self.assertTrue(self.react()["ok"])
+
+    def test_react_shares_the_budget_with_posts(self):
+        for i in range(5):
+            self.assertTrue(self.broker.handle(
+                {"op": "post", "channel": "general", "text": "m%d" % i})["ok"])
+        self.assertTrue(self.react()["ok"])
+        self.assertFalse(self.react()["ok"])
+        self.assertFalse(self.broker.handle(
+            {"op": "post", "channel": "general", "text": "more"})["ok"])
+
+    def test_refused_requests_keep_their_budget(self):
+        for _ in range(10):
+            self.react(emoji="ok")
+            self.react(message_id="x")
+            self.react(channel="secret")
+        self.assertTrue(self.react()["ok"])
+
+    def test_failed_react_keeps_its_rate_slot_and_shows_the_error(self):
+        self.discord.fail_react = bk.BrokerError("Discord refused the request (HTTP 404).")
+        for _ in range(6):
+            self.assertIn("404", self.react()["error"])
+        self.discord.fail_react = None
+        self.assertIn("Too many messages", self.react()["error"])
+
+    def test_react_logs_the_channel_name_with_zero_length(self):
+        self.react()
+        self.react(channel="bad\nFAKE", emoji="ok")
+        with open(os.path.join(self.tmp, "broker.log")) as fh:
+            lines = fh.read().splitlines()
+        self.assertEqual(len(lines), 2)
+        self.assertIn(" react general len=0 ok", lines[0])
+        self.assertIn(" react 'bad\\nFAKE' len=0 error", lines[1])
+        self.assertNotIn("\N{THUMBS UP SIGN}", "".join(lines))
+
+    def test_unknown_op_lists_react(self):
+        r = self.broker.handle({"op": "dance"})
+        self.assertEqual(r["error"], "Unknown op. Choices: ask, check, post, react, read, reply.")
 
 
 class TestAsk(BrokerCase):
@@ -810,6 +921,43 @@ class TestDiscordClient(unittest.TestCase):
             d.post(GENERAL, "hi")
         self.assertNotIn(TOKEN, str(cm.exception))
         self.assertNotIn(TOKEN, repr(d))
+
+    def test_react_puts_to_the_encoded_path_with_no_body(self):
+        seen = {}
+
+        def opener(req, timeout=None):
+            seen["method"] = req.get_method()
+            seen["url"] = req.full_url
+            seen["data"] = req.data
+            return io.BytesIO(b"")          # Discord answers 204 with no body
+
+        out = bk.Discord(TOKEN, opener=opener).react(GENERAL, "555", "\N{THUMBS UP SIGN}")
+        self.assertIsNone(out)
+        self.assertEqual(seen["method"], "PUT")
+        self.assertEqual(seen["url"], "%s/channels/%s/messages/555/reactions/%%F0%%9F%%91%%8D/@me"
+                         % (bk.API_BASE, GENERAL))
+        self.assertIsNone(seen["data"])
+
+    def test_react_encodes_every_reserved_character(self):
+        seen = {}
+
+        def opener(req, timeout=None):
+            seen["url"] = req.full_url
+            return io.BytesIO(b"")
+
+        bk.Discord(TOKEN, opener=opener).react(GENERAL, "5", "a/b?c#d%e")
+        self.assertTrue(seen["url"].endswith("/reactions/a%2Fb%3Fc%23d%25e/@me"), seen["url"])
+
+    def test_react_errors_map_like_post(self):
+        d = self.client(self.http_error(429, b'{"retry_after": 1.2}'))
+        with self.assertRaises(bk.RateLimited) as cm:
+            d.react(GENERAL, "5", "\N{THUMBS UP SIGN}")
+        self.assertIn("in 2 s", str(cm.exception))
+        d = self.client(self.http_error(404, b'{"message": "Unknown Message"}'))
+        with self.assertRaises(bk.BrokerError) as cm:
+            d.react(GENERAL, "5", "\N{THUMBS UP SIGN}")
+        self.assertIn("404", str(cm.exception))
+        self.assertNotIn(TOKEN, str(cm.exception))
 
     def test_messages_query(self):
         seen = {}

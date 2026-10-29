@@ -10,6 +10,7 @@ voice assistant, so it is plain text and short.
     team ask <agent|team> <text...> [--wait N]
     team check [ticket]
     team read <channel> [n]
+    team react <channel> <message-id> <emoji>
 
 The socket is $TEAM_SOCKET, or /run/grokbot-broker/team.sock.
 
@@ -89,6 +90,9 @@ def _build(args):
     if op == "reply":
         return ({"op": "reply", "channel": args.channel, "message_id": args.message_id,
                  "text": _text(args.text)}, OP_TIMEOUT)
+    if op == "react":
+        return ({"op": "react", "channel": args.channel, "message_id": args.message_id,
+                 "emoji": args.emoji}, OP_TIMEOUT)
     if op == "ask":
         return ({"op": "ask", "agent": args.agent, "text": _text(args.text),
                  "wait": args.wait}, ask_timeout(args.wait))
@@ -201,6 +205,11 @@ def _parser():
     p.add_argument("channel")
     p.add_argument("n", nargs="?", type=int)
 
+    p = sub.add_parser("react", help="react to a message with an emoji")
+    p.add_argument("channel")
+    p.add_argument("message_id")
+    p.add_argument("emoji")
+
     return ap
 
 
@@ -247,6 +256,8 @@ def _format_ok(op, resp):
         return _format_check(resp.get("tickets") or [], resp.get("omitted") or 0)
     if op == "read":
         return _format_read(resp.get("messages") or [])
+    if op == "react":
+        return "Reacted."
     return "Sent."
 
 

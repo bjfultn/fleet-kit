@@ -171,6 +171,27 @@ class TeamTests(unittest.TestCase):
         self.assertEqual(fake.calls[0][0], {"op": "reply", "channel": "general",
                                             "message_id": "12345", "text": "on it"})
 
+    def test_react_builds_the_request_and_prints_reacted(self):
+        fake = FakeBroker({"ok": True})
+        code, out, err = run(["react", "general", "12345", "\N{THUMBS UP SIGN}"], fake)
+        self.assertEqual((code, out, err), (0, "Reacted.\n", ""))
+        self.assertEqual(fake.calls[0], ({"op": "react", "channel": "general",
+                                          "message_id": "12345",
+                                          "emoji": "\N{THUMBS UP SIGN}"}, team.OP_TIMEOUT))
+
+    def test_react_needs_all_three_arguments(self):
+        for argv in (["react"], ["react", "general"], ["react", "general", "1"]):
+            fake = FakeBroker({"ok": True})
+            with self.assertRaises(SystemExit), mock.patch("sys.stderr", io.StringIO()):
+                team.main(argv, connect=fake)
+            self.assertEqual(fake.calls, [])
+
+    def test_react_prints_the_brokers_refusal(self):
+        fake = FakeBroker({"ok": False, "error": "Use one emoji, like \N{THUMBS UP SIGN}."})
+        code, out, err = run(["react", "general", "1", "ok"], fake)
+        self.assertEqual((code, out), (1, ""))
+        self.assertEqual(err, "team: Use one emoji, like \N{THUMBS UP SIGN}.\n")
+
     def test_check_formats_one_line_per_ticket(self):
         fake = FakeBroker({"ok": True, "tickets": [
             {"ticket": "t1", "agent": "sonnet", "status": "answered", "reply": "yes",
