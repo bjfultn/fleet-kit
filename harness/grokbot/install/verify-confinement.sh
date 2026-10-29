@@ -109,7 +109,8 @@ secret_find() {
            -o -path /var/lib/docker -o -path "/home/$AGENT" \) -prune -o \
         -readable \
         \( -name '*.env' -o -name '.env*' -o -name '*.key' -o -name '*.pem' \
-           -o -name 'token*' -o -name 'access.json' \) \
+           -o -name token -o -name 'token.*' -o -name '*.token' -o -name 'token-*' \
+           -o -name 'access.json' \) \
         -not -path '*/node_modules/*' -not -path '*/site-packages/*' \
         -not -path '*/dist-packages/*' -print 2>/dev/null
 }
@@ -124,7 +125,21 @@ if install -m 0600 -o "$AGENT" -g "$AGENT" /dev/null "$CANARY" 2>/dev/null \
     out=$(secret_find /)
     rc=$?
     rm -f "$CANARY"
-    hits=$(printf '%s\n' "$out" | head -5 | sed '/^$/d')
+    if ! cant_trust "$rc"; then
+        # Certificates and keys by name are only a hit if they hold a private
+        # key. One agent call over the whole list; the list goes in on stdin.
+        out=$(printf '%s\n' "$out" | as_agent timeout 120 sh -c '
+            while IFS= read -r f; do
+                [ -n "$f" ] || continue
+                case $f in
+                    *.pem|*.crt|*.key) grep -qs "PRIVATE KEY" "$f" && printf "%s\n" "$f" ;;
+                    *) printf "%s\n" "$f" ;;
+                esac
+            done
+            exit 0' 2>/dev/null)
+        rc=$?
+    fi
+    hits=$(printf '%s\n' "$out" | head -10 | sed '/^$/d')
     if cant_trust "$rc"; then
         fail "$name" "$(why "$rc")"
     elif [ -z "$hits" ]; then
