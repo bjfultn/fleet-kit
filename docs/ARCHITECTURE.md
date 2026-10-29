@@ -50,6 +50,74 @@ log, then set it to 1.
 **Waking an agent types text into a tool-capable pane.** Treat the allowlist as
 a real security boundary.
 
+### Grok Bot agents
+
+An agent whose `config.json` has `"platform": "grok-bot"` is a Grok Bot hosted by
+xAI. It has no tmux pane, so the watcher wakes it by POSTing to a routine
+webhook instead (`bin/grokbot_wake.py`). It is left out of the tmux map and
+watched through its own path; Claude agents are unaffected.
+
+```json
+{
+  "platform": "grok-bot",
+  "alias": "...",
+  "discord": { "bot_id": "...", "private_channel_id": "...", "state_dir": "~/.claude/channels/discord-..." },
+  "grokbot": {
+    "webhook_pass_key": "fleet/...-webhook",
+    "tickets_file": "/var/lib/.../tickets.json",
+    "quiet_hours": true,
+    "quiet_tz": "Europe/London"
+  }
+}
+```
+
+- **Body.** Always `{"messages": [{"channel_id", "message_id", "author",
+  "author_id", "text", "ts"}, ...]}`, a list even for one wake. Text is
+  sanitized and cut to 1500 characters.
+- **Secret.** `pass show <webhook_pass_key>`: line 1 is the https URL, line 2
+  the bearer key. A locked store logs `secret store locked` and the wake is
+  retried after the backoff below. Neither value is ever logged.
+- **Who may wake it.** Checked every time, and **not** governed by
+  `MENTION_WATCHER_ENFORCE`: the message text leaves the box, so there is no
+  dry-run mode. The allowlist is the agent's own `access.json` under
+  `discord.state_dir`, same format as the plugin's: `allowFrom` (humans),
+  `allowBots` (bots), and the keys of `groups` as the channels it may see. Only
+  the top-level lists count, not a per-group `allowFrom`. The agent's private
+  channel must be listed under `groups`. A missing or unreadable file allows
+  nobody. The file is re-read when it changes; a new channel needs a watcher
+  restart to be polled. A human `@everyone` in the agent's own private channel
+  wakes it, since everything there does; in any other channel it does not.
+- **What wakes it.** A user mention of its bot id, or any message in its private
+  channel. `@everyone`, `@here` and role tags do not count as a tag. Its own
+  messages never wake it. Nor does a reply the broker has taken for one of its
+  own asks. The broker records what it consumed in `tickets_file`
+  (`{"tickets": [{"ask_message_id", "status", "reply_message_ids",
+  "expected_author_ids", ...}]}`, read-only here). A reply to an ask is held
+  back only if its id is in that ticket's `reply_message_ids`, or the ticket is
+  still `working` and the author is in `expected_author_ids`. Everything else
+  wakes the agent as usual: a second message after an "on it", a human's reply,
+  another agent's reply. Missing or unreadable means no asks, with a warning; a
+  ticket without the two fields claims nothing.
+- **Throttle.** One wake in flight per agent: anything inside 120 s of the last
+  send is held and goes out together as one body. Bot-authored wakes are capped
+  at 4 per channel per hour, per agent, to stop two bots answering each other.
+  The cap is per channel rather than per reply chain because each reply in a
+  chain points at the previous message, so a chain never repeats a key. It is
+  counted when a wake is sent (a coalesced batch counts once), so messages held
+  overnight do not spend the budget; past the cap, bot-authored messages are
+  dropped with a log line. Humans are never capped. A failed POST, including
+  an exception, puts the batch back (and returns its count) and retries after
+  the same 120 s. Held queues are in memory and capped at 20 per agent.
+- **Quiet hours.** With `grokbot.quiet_hours` true, bot-authored wakes are held
+  22:00 to 07:00 and released together; humans are never held for it. The
+  clock is `grokbot.quiet_tz` (an IANA name, default `UTC`; set it per agent); an
+  unknown name is a startup error. A human wake takes the held messages with it.
+- **Startup warnings.** The watcher logs a `WARNING` line at start when the
+  private channel is not in the agent's `groups`, when `webhook_pass_key` is
+  missing, when `tickets_file` is unset (nothing then stops reply-pings except
+  the cap), or when it is set but unreadable. An unreadable tickets file
+  fails open (no asks known) and is re-logged at most every 10 minutes.
+
 ## 3. fleet.json
 
 Fleet-wide settings the scripts read at startup.

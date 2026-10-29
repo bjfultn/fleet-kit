@@ -1,0 +1,62 @@
+[Unit]
+Description=__AGENT__ Grok Bot desktop app (confined)
+Requires=__AGENT__-egress.service
+BindsTo=__AGENT__-egress.service
+After=__AGENT__-egress.service
+After=__AGENT__-broker.service
+
+[Service]
+Type=simple
+User=__AGENT__
+Group=__AGENT__
+WorkingDirectory=/home/__AGENT__
+Environment=HOME=/home/__AGENT__
+Environment=TEAM_SOCKET=/run/__AGENT__-broker/team.sock
+# "+" runs this as root; the app must not start unless the egress table is loaded.
+ExecStartPre=+/usr/sbin/nft list table inet __AGENT___egress
+ExecStart=/usr/bin/xvfb-run -a -s "-screen 0 1280x800x24" grok-bot --password-store=basic
+NoNewPrivileges=yes
+ProtectSystem=strict
+# The leading "-" keeps a path that does not exist on this box from failing the unit.
+InaccessiblePaths=-/var/lib/docker -/etc/__AGENT__-broker -/var/lib/__AGENT__-broker -/run/docker.sock
+# render.sh turns its PRIVATE_PATH arguments into InaccessiblePaths=- lines here.
+__PRIVATE_PATHS__
+PrivateTmp=yes
+ProtectProc=invisible
+ProcSubset=pid
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+ProtectHome=tmpfs
+BindPaths=/home/__AGENT__
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+# The agent may open connections but must never accept one: a listener on a
+# free localhost port that a reverse proxy points at would let it serve a public
+# hostname. These are enforced by the unit's cgroup (eBPF), so they survive an
+# `nft flush ruleset`, unlike egress.nft.
+#  - SocketBindDeny=any blocks bind() on any port 1-65535. Port 0 (an ephemeral
+#    port) is not covered by it, which is why the address filter below exists.
+#  - IPAddressDeny drops traffic to and from loopback, link-local, multicast and
+#    the private ranges, so a socket bound to an ephemeral port still cannot be
+#    reached. IPAddressAllow wins over Deny, so the DNS stub stays reachable.
+SocketBindDeny=any
+IPAddressDeny=localhost link-local multicast 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 100.64.0.0/10
+IPAddressAllow=127.0.0.53
+# Resource limits and extra hardening. Electron is the likeliest thing to trip
+# these: if the app or its sandbox fails to start, read the journal and loosen
+# one line at a time (PrivateDevices and CapabilityBoundingSet first, then
+# MemoryMax and TasksMax if it is killed under load). Tune them at install time.
+MemoryMax=4G
+TasksMax=512
+CPUQuota=200%
+PrivateDevices=yes
+RemoveIPC=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectClock=yes
+LockPersonality=yes
+RestrictSUIDSGID=yes
+CapabilityBoundingSet=
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

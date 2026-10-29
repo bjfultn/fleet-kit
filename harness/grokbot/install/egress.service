@@ -1,0 +1,16 @@
+[Unit]
+Description=__AGENT__ egress firewall (nftables)
+After=nftables.service
+Before=__AGENT__-app.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# Validate first: a bad file must leave the running rules untouched.
+ExecStartPre=/usr/sbin/nft -c -f /etc/__AGENT__-firewall/egress.nft
+ExecStart=/usr/sbin/nft -f /etc/__AGENT__-firewall/egress.nft
+# No ExecStop on purpose: stopping this unit must not open the firewall.
+# Remove the table by hand (see README, "Removing it").
+
+[Install]
+WantedBy=multi-user.target
