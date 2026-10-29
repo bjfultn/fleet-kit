@@ -247,6 +247,42 @@ class TeamTests(unittest.TestCase):
         self.assertEqual(ask.calls[1][0]["wait"], 7)
         self.assertEqual(ask.calls[1][0]["text"], "hi")
 
+    def _ask(self, argv):
+        fake = FakeBroker({"ok": True, "ticket": "t", "status": "working", "reply": None})
+        code, out, err = run(argv, fake)
+        self.assertEqual((code, err), (0, ""), argv)
+        return fake.calls[0][0]
+
+    def test_ask_wait_right_after_ask(self):
+        req = self._ask(["ask", "--wait", "0", "sonnet", "-x", "y"])
+        self.assertEqual(req, {"op": "ask", "agent": "sonnet", "text": "-x y", "wait": 0})
+        req = self._ask(["ask", "--wait=4", "sonnet", "hi"])
+        self.assertEqual((req["wait"], req["text"]), (4, "hi"))
+
+    def test_ask_wait_right_after_agent(self):
+        req = self._ask(["ask", "sonnet", "--wait", "5", "hi", "there"])
+        self.assertEqual((req["wait"], req["text"]), (5, "hi there"))
+        req = self._ask(["ask", "sonnet", "--wait=7", "hi"])
+        self.assertEqual((req["wait"], req["text"]), (7, "hi"))
+
+    def test_ask_wait_trailing(self):
+        req = self._ask(["ask", "sonnet", "hi", "there", "--wait", "5"])
+        self.assertEqual((req["wait"], req["text"]), (5, "hi there"))
+        req = self._ask(["ask", "sonnet", "for", "me", "--wait=9"])
+        self.assertEqual((req["wait"], req["text"]), (9, "for me"))
+
+    def test_ask_wait_only_in_three_places(self):
+        # Mid-text, or a trailing --wait with no int, stays literal text.
+        req = self._ask(["ask", "sonnet", "please", "--wait", "for", "me"])
+        self.assertEqual((req["wait"], req["text"]), (60, "please --wait for me"))
+        req = self._ask(["ask", "sonnet", "hi", "--wait"])
+        self.assertEqual((req["wait"], req["text"]), (60, "hi --wait"))
+        req = self._ask(["ask", "sonnet", "hi", "--wait", "abc"])
+        self.assertEqual((req["wait"], req["text"]), (60, "hi --wait abc"))
+        # Only the trailing pair is the wait; the mid-text one is text.
+        req = self._ask(["ask", "sonnet", "a", "--wait", "5", "b", "--wait", "7"])
+        self.assertEqual((req["wait"], req["text"]), (7, "a --wait 5 b"))
+
     def test_oserror_is_not_running(self):
         fake = FakeBroker(error=OSError("AF_UNIX path too long"))
         code, out, err = run(["check"], fake)

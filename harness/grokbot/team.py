@@ -19,6 +19,7 @@ Stdlib only.
 import argparse
 import json
 import os
+import re
 import socket
 import sys
 
@@ -86,26 +87,69 @@ def _build(args):
     raise ValueError("unknown op %r" % op)
 
 
-def _guard_text(argv):
-    """Put '--' in front of the text words, so a word starting with '-' is
-    never read as an option. For ask, the leading --wait option stays in front
-    of the separator, as does the agent."""
+def _is_count(text):
+    return re.fullmatch(r"[0-9]+", text) is not None
+
+
+def _wait_at(tokens, i):
+    """(seconds, width) when tokens[i] is `--wait N` or `--wait=N`, else None.
+    A --wait with no whole number after it is not a wait option."""
+    if i < 0 or i >= len(tokens):
+        return None
+    tok = tokens[i]
+    if tok == "--wait":
+        if i + 1 < len(tokens) and _is_count(tokens[i + 1]):
+            return int(tokens[i + 1]), 2
+        return None
+    if tok.startswith("--wait=") and _is_count(tok[len("--wait="):]):
+        return int(tok[len("--wait="):]), 1
+    return None
+
+
+def _normalize_ask(argv):
+    """ask takes --wait in three places only: right after 'ask', right after
+    the agent, or as the final token(s). Those are pulled out; everything else
+    after the agent is text, placed after '--' so a leading '-' stays literal."""
+    rest = argv[1:]
+    wait = None
+    pos = 0
+    while _wait_at(rest, pos):
+        wait, width = _wait_at(rest, pos)
+        pos += width
+    if pos >= len(rest):
+        return argv                      # no agent: let argparse say so
+    agent = rest[pos]
+    pos += 1
+    while _wait_at(rest, pos):
+        wait, width = _wait_at(rest, pos)
+        pos += width
+    text = rest[pos:]
+    for start in (len(rest) - 2, len(rest) - 1):
+        hit = _wait_at(rest, start) if start >= pos else None
+        if hit and start + hit[1] == len(rest):
+            wait = hit[0]
+            text = rest[pos:start]
+            break
+    out = ["ask", agent]
+    if wait is not None:
+        out += ["--wait", str(wait)]
+    if text:
+        out += ["--"] + text
+    return out
+
+
+def _normalize(argv):
+    """Put '--' in front of the text words of post, reply and ask, so a word
+    starting with '-' is never read as an option."""
     if not argv:
         return argv
     op = argv[0]
+    if op == "ask":
+        return _normalize_ask(argv)
     if op == "post":
         start = 2
     elif op == "reply":
         start = 3
-    elif op == "ask":
-        start = 2
-        while start < len(argv):
-            if argv[start] == "--wait":
-                start += 2
-            elif argv[start].startswith("--wait="):
-                start += 1
-            else:
-                break
     else:
         return argv
     if start >= len(argv):
@@ -190,7 +234,7 @@ def main(argv, connect=None):
     """Run one team command. Returns the exit status."""
     if connect is None:
         connect = unix_connect
-    args = _parser().parse_args(_guard_text(argv))
+    args = _parser().parse_args(_normalize(argv))
     request, timeout = _build(args)
     try:
         resp = connect(request, timeout)
