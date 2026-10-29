@@ -25,7 +25,7 @@ sys.path.insert(0, os.path.join(HERE, ".."))
 import broker as bk  # noqa: E402
 
 GENERAL = "300000000000000001"
-ALBERT = "300000000000000002"
+NOVA = "300000000000000002"
 CURTIS_CH = "300000000000000003"
 SONNET_CH = "300000000000000004"
 CAGE_CH = "300000000000000005"
@@ -39,7 +39,7 @@ TOKEN = "TESTTOKEN.not-a-real-secret"
 
 def make_config(tmp, **over):
     cfg = {
-        "channels": {"albert": ALBERT, "general": GENERAL, "curtis": CURTIS_CH,
+        "channels": {"nova": NOVA, "general": GENERAL, "curtis": CURTIS_CH,
                      "sonnet": SONNET_CH, "cage": CAGE_CH, "reid": REID_CH},
         "agents": {"sonnet": {"bot_id": SONNET, "channel": "sonnet"},
                    "curtis": {"bot_id": CURTIS, "channel": "curtis"},
@@ -681,13 +681,13 @@ class TestLogging(BrokerCase):
 
 class TestRead(BrokerCase):
     def test_read_returns_speakable_oldest_first(self):
-        self.discord.add(GENERAL, HUMAN, "**hello** there", username="bj_user")
+        self.discord.add(GENERAL, HUMAN, "**hello** there", username="operator_user")
         self.discord.add(GENERAL, SONNET, "see <@%s>" % CURTIS, reply_to="5")
         out = self.broker.handle({"op": "read", "channel": "general", "n": 10})
         self.assertTrue(out["ok"])
         first, second = out["messages"]
         self.assertEqual(first["text"], "hello there")
-        self.assertEqual(first["author"], "bj_user")
+        self.assertEqual(first["author"], "operator_user")
         self.assertEqual(second["author"], "sonnet")
         self.assertEqual(second["text"], "see curtis")
         self.assertEqual(second["reply_to"], "5")
@@ -767,6 +767,68 @@ class TestDiscordClient(unittest.TestCase):
         self.assertIn("/channels/%s/messages?" % GENERAL, seen["url"])
         self.assertIn("after=12", seen["url"])
         self.assertIn("limit=100", seen["url"])
+
+
+class RedirectServers:
+    """Two local HTTP servers: `front` answers 302 to `back`, which records what
+    reaches it. Used to prove an Authorization header is never forwarded."""
+
+    def __init__(self):
+        import http.server
+        self.back_seen = []
+        outer = self
+
+        class Back(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                outer.back_seen.append(dict(self.headers))
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b"[]")
+            do_POST = do_GET
+
+            def log_message(self, *a):
+                pass
+
+        self.back = http.server.HTTPServer(("127.0.0.1", 0), Back)
+
+        class Front(http.server.BaseHTTPRequestHandler):
+            def _redirect(self):
+                self.send_response(302)
+                self.send_header("Location", "http://127.0.0.1:%d/x" % outer.back.server_port)
+                self.end_headers()
+            do_GET = _redirect
+            do_POST = _redirect
+
+            def log_message(self, *a):
+                pass
+
+        self.front = http.server.HTTPServer(("127.0.0.1", 0), Front)
+        self.threads = [threading.Thread(target=srv.serve_forever, daemon=True)
+                        for srv in (self.front, self.back)]
+        for t in self.threads:
+            t.start()
+
+    @property
+    def front_url(self):
+        return "http://127.0.0.1:%d" % self.front.server_port
+
+    def close(self):
+        for srv in (self.front, self.back):
+            srv.shutdown()
+            srv.server_close()
+
+
+class TestNoRedirects(unittest.TestCase):
+    def test_discord_client_does_not_follow_redirects(self):
+        servers = RedirectServers()
+        self.addCleanup(servers.close)
+        d = bk.Discord(TOKEN, base=servers.front_url)
+        with self.assertRaises(bk.BrokerError) as cm:
+            d.messages(GENERAL)
+        self.assertIn("HTTP 302", str(cm.exception))
+        with self.assertRaises(bk.BrokerError):
+            d.post(GENERAL, "hi")
+        self.assertEqual(servers.back_seen, [])   # the Authorization header went nowhere
 
 
 def rpc(path, req, timeout=10):

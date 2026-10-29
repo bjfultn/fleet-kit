@@ -101,12 +101,24 @@ class LookupBudget(BrokerError):
 
 # -- Discord REST --------------------------------------------------------------
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Never follow a redirect: urllib would resend the Authorization header to
+    wherever it points. A 3xx becomes an HTTPError instead."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def no_redirect_open(req, timeout=None):
+    return urllib.request.build_opener(_NoRedirect).open(req, timeout=timeout)
+
+
 class Discord:
     """The two REST calls the broker needs. Holds the token; never shows it."""
 
     def __init__(self, token, opener=None, base=API_BASE):
         self._auth = "Bot " + token
-        self._open = opener or urllib.request.urlopen
+        self._open = opener or no_redirect_open
         self._base = base
 
     def __repr__(self):

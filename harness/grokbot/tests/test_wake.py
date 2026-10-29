@@ -10,8 +10,10 @@ import os
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 import urllib.error
+import urllib.request
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -28,7 +30,7 @@ HUMAN = "555555555555555555"      # allowlisted human
 TEAMBOT = "666666666666666666"    # allowlisted bot
 STRANGER = "777777777777777777"   # on no list
 
-DENVER = ZoneInfo("America/Denver")
+LOCAL = ZoneInfo("America/Chicago")
 
 
 def agent(**over):
@@ -69,11 +71,11 @@ class FakeClock:
 
 
 def noon():
-    return datetime(2026, 10, 28, 12, 0, tzinfo=DENVER)
+    return datetime(2026, 10, 28, 12, 0, tzinfo=LOCAL)
 
 
 def at_2am():
-    return datetime(2026, 10, 28, 2, 0, tzinfo=DENVER)
+    return datetime(2026, 10, 28, 2, 0, tzinfo=LOCAL)
 
 
 class Resp:
@@ -96,15 +98,91 @@ def ok_runner(stdout="https://hooks.example.invalid/w/abc\nsecret-key-123\n"):
     return run
 
 
+class RedirectServers:
+    """Two local HTTP servers: `front` answers 302 to `back`, which records what
+    reaches it. Used to prove an Authorization header is never forwarded."""
+
+    def __init__(self):
+        import http.server
+        self.back_seen = []
+        outer = self
+
+        class Back(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                outer.back_seen.append(dict(self.headers))
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b"[]")
+            do_POST = do_GET
+
+            def log_message(self, *a):
+                pass
+
+        self.back = http.server.HTTPServer(("127.0.0.1", 0), Back)
+
+        class Front(http.server.BaseHTTPRequestHandler):
+            def _redirect(self):
+                self.send_response(302)
+                self.send_header("Location", "http://127.0.0.1:%d/x" % outer.back.server_port)
+                self.end_headers()
+            do_GET = _redirect
+            do_POST = _redirect
+
+            def log_message(self, *a):
+                pass
+
+        self.front = http.server.HTTPServer(("127.0.0.1", 0), Front)
+        self.threads = [threading.Thread(target=srv.serve_forever, daemon=True)
+                        for srv in (self.front, self.back)]
+        for t in self.threads:
+            t.start()
+
+    @property
+    def front_url(self):
+        return "http://127.0.0.1:%d" % self.front.server_port
+
+    def close(self):
+        for srv in (self.front, self.back):
+            srv.shutdown()
+            srv.server_close()
+
+
+class RedirectTests(unittest.TestCase):
+    def test_webhook_opener_does_not_follow_redirects(self):
+        servers = RedirectServers()
+        self.addCleanup(servers.close)
+        req = urllib.request.Request(servers.front_url + "/hook", data=b"{}", method="POST",
+                                     headers={"Authorization": "Bearer secret-key-123"})
+        with self.assertRaises(urllib.error.HTTPError) as cm:
+            gw.no_redirect_open(req, timeout=5)
+        cm.exception.close()
+        self.assertEqual(cm.exception.code, 302)
+        self.assertEqual(servers.back_seen, [])
+
+    def test_wake_uses_the_no_redirect_opener_by_default(self):
+        import inspect
+        default = inspect.signature(gw.wake_grokbot).parameters["opener"].default
+        self.assertIs(default, gw.no_redirect_open)
+
+    def test_a_redirect_is_a_failed_wake_not_a_follow(self):
+        def opener(req, timeout=None, **kw):
+            raise urllib.error.HTTPError(req.full_url, 302, "Found", {}, io.BytesIO(b""))
+        logs = []
+        ok = gw.wake_grokbot("gizmo", "fleet/x", {"messages": []}, logs.append,
+                             opener=opener, runner=ok_runner())
+        self.assertFalse(ok)
+        self.assertTrue(any("HTTP 302" in line for line in logs))
+
+
 class PayloadTests(unittest.TestCase):
     def test_build_payload_fields(self):
-        m = msg(content="hi <@111111111111111111> <script>", username="bj")
+        m = msg(content="hi <@111111111111111111> <script>", username="operator")
         p = gw.build_payload(m, GENERAL)
         self.assertEqual(set(p), {"channel_id", "message_id", "author",
                                   "author_id", "text", "ts"})
         self.assertEqual(p["channel_id"], GENERAL)
         self.assertEqual(p["message_id"], "900000000000000001")
-        self.assertEqual(p["author"], "bj")
+        self.assertEqual(p["author"], "operator")
         self.assertEqual(p["author_id"], HUMAN)
         self.assertEqual(p["ts"], "2026-10-28T12:00:00.000000+00:00")
         # sanitized: discord mention markup survives, other tags are neutered
@@ -262,7 +340,7 @@ class TargetTests(unittest.TestCase):
         a = agent(allowed_channels=set(), allow_from=set(), allow_bots=set())
         self.assertFalse(gw.grokbot_targets(msg(mentions=[BOT]), PRIVATE, a, {}))
 
-    def test_reply_to_albert_ask_does_not_wake(self):
+    def test_reply_to_own_ask_does_not_wake(self):
         # a reply the broker recorded as consumed does not wake
         ask = "800000000000000001"
         m = msg(author=TEAMBOT, mentions=[BOT], reply_to=ask, bot=True)
@@ -460,7 +538,7 @@ class GateTests(unittest.TestCase):
         for n in range(6):
             self.assertEqual(g.admit("gizmo", GENERAL, True, at_2am()), "hold")
             g.hold("gizmo", {"message_id": str(n), "channel_id": GENERAL}, True)
-        morning = datetime(2026, 10, 28, 7, 0, tzinfo=DENVER)
+        morning = datetime(2026, 10, 28, 7, 0, tzinfo=LOCAL)
         clock.t += 8 * 3600
         # they go out as one wake, which counts once
         self.assertEqual(len(g.drain("gizmo", morning)), 6)
@@ -497,7 +575,7 @@ class GateTests(unittest.TestCase):
         self.assertEqual(g2.admit("gizmo", "t", True, noon()), "send")
         for hour, expect in ((21, "send"), (22, "hold"), (6, "hold"), (7, "send")):
             g3 = gw.WakeGate(FakeClock(), quiet_hours={"gizmo"})
-            t = datetime(2026, 10, 28, hour, 30, tzinfo=DENVER)
+            t = datetime(2026, 10, 28, hour, 30, tzinfo=LOCAL)
             self.assertEqual(g3.admit("gizmo", "t", True, t), expect, hour)
 
     def test_quiet_drain_keeps_bot_messages_until_morning(self):
@@ -506,7 +584,7 @@ class GateTests(unittest.TestCase):
         g.hold("gizmo", {"message_id": "b"}, True)
         clock.t += 1000
         self.assertEqual(g.drain("gizmo", at_2am()), [])
-        morning = datetime(2026, 10, 28, 7, 0, tzinfo=DENVER)
+        morning = datetime(2026, 10, 28, 7, 0, tzinfo=LOCAL)
         self.assertEqual([p["message_id"] for p in g.drain("gizmo", morning)], ["b"])
 
     def test_failed_send_requeues_and_backs_off(self):
@@ -613,7 +691,7 @@ class LoaderTests(unittest.TestCase):
 
 
     def test_quiet_tz_defaults_and_overrides(self):
-        for tz_cfg, want in ((None, "America/Denver"), ("Europe/London", "Europe/London")):
+        for tz_cfg, want in ((None, "UTC"), ("Europe/London", "Europe/London")):
             with tempfile.TemporaryDirectory() as root:
                 gb = {"quiet_hours": True}
                 if tz_cfg:
@@ -637,7 +715,7 @@ class LoaderTests(unittest.TestCase):
 
 def gagent(**over):
     a = agent(webhook_pass_key="fleet/x", tickets_file="", quiet_hours=False,
-              quiet_tz="America/Denver", allowed_channels={PRIVATE, GENERAL})
+              quiet_tz="America/Chicago", allowed_channels={PRIVATE, GENERAL})
     a.update(over)
     return a
 
@@ -764,7 +842,7 @@ class WakerTests(unittest.TestCase):
         h.w.drain()
         self.assertEqual(h.sent, [])
         self.assertEqual(set(h.tz_asked), {"Europe/London"})
-        h.local = datetime(2026, 10, 28, 7, 0, tzinfo=DENVER)
+        h.local = datetime(2026, 10, 28, 7, 0, tzinfo=LOCAL)
         h.w.drain()
         self.assertEqual(len(h.sent), 1)
         self.assertEqual(h.ids(), ["900000000000000001"])

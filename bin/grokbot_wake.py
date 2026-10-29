@@ -40,7 +40,7 @@ HOP_WINDOW = 3600
 MAX_HELD = 20              # held payloads per agent; oldest dropped beyond this
 QUIET_START_HOUR = 22      # bot-authored wakes held 22:00 to 07:00 local
 QUIET_END_HOUR = 7
-DEFAULT_QUIET_TZ = "America/Denver"
+DEFAULT_QUIET_TZ = "UTC"   # a default that is wrong for most people: set grokbot.quiet_tz per agent
 TICKET_WARN_INTERVAL = 600  # at most one unreadable-tickets log line per this long
 
 
@@ -373,11 +373,27 @@ def load_webhook(pass_key: str, runner=subprocess.run, log=None):
     return url, key
 
 
-def wake_grokbot(alias, pass_key, body, log, opener=urllib.request.urlopen,
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Never follow a redirect: urllib would resend the bearer key to wherever
+    it points. A 3xx becomes an HTTPError, which is a failed wake."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def no_redirect_open(req, timeout=None, context=None):
+    handlers = [_NoRedirect()]
+    if context is not None:
+        handlers.append(urllib.request.HTTPSHandler(context=context))
+    return urllib.request.build_opener(*handlers).open(req, timeout=timeout)
+
+
+def wake_grokbot(alias, pass_key, body, log, opener=no_redirect_open,
                  runner=subprocess.run, context=None) -> bool:
     """POST body to the agent's routine webhook. True on 2xx.
 
-    The URL and key are secrets: neither is ever written to the log.
+    The URL and key are secrets: neither is ever written to the log. Redirects
+    are never followed, so the key cannot be forwarded to another host.
     """
     secret = load_webhook(pass_key, runner, log=lambda s: log(f"  wake {alias} skipped: {s}"))
     if secret is None:

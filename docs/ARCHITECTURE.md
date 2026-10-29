@@ -66,7 +66,7 @@ watched through its own path; Claude agents are unaffected.
     "webhook_pass_key": "fleet/...-webhook",
     "tickets_file": "/var/lib/.../tickets.json",
     "quiet_hours": true,
-    "quiet_tz": "America/Denver"
+    "quiet_tz": "Europe/London"
   }
 }
 ```
@@ -110,7 +110,7 @@ watched through its own path; Claude agents are unaffected.
   the same 120 s. Held queues are in memory and capped at 20 per agent.
 - **Quiet hours.** With `grokbot.quiet_hours` true, bot-authored wakes are held
   22:00 to 07:00 and released together; humans are never held for it. The
-  clock is `grokbot.quiet_tz` (an IANA name, default `America/Denver`); an
+  clock is `grokbot.quiet_tz` (an IANA name, default `UTC`; set it per agent); an
   unknown name is a startup error. A human wake takes the held messages with it.
 - **Startup warnings.** The watcher logs a `WARNING` line at start when the
   private channel is not in the agent's `groups`, when `webhook_pass_key` is
