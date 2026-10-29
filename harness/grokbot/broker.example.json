@@ -1,0 +1,28 @@
+{
+  "channels": {
+    "albert": "111111111111111101",
+    "general": "111111111111111102",
+    "curtis": "111111111111111103",
+    "sonnet": "111111111111111104",
+    "cage": "111111111111111105",
+    "reid": "111111111111111106"
+  },
+  "agents": {
+    "sonnet": {"bot_id": "111111111111111111", "channel": "sonnet"},
+    "curtis": {"bot_id": "111111111111111112", "channel": "curtis"},
+    "cage": {"bot_id": "111111111111111113", "channel": "cage"},
+    "reid": {"bot_id": "111111111111111114", "channel": "reid"}
+  },
+  "router": "sonnet",
+  "token_file": "/var/lib/example-broker/token",
+  "allowed_uid": 1001,
+  "socket": "/var/lib/example-broker/broker.sock",
+  "state_dir": "/var/lib/example-broker/state",
+  "log_file": "/var/lib/example-broker/broker.log",
+  "rate_per_minute": 6,
+  "max_len": 1800,
+  "ask_wait": 60,
+  "ticket_days": 7,
+  "max_line": 65536,
+  "conn_timeout": 90
+}
