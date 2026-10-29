@@ -299,6 +299,42 @@ else:
 probe_agent() { as_agent timeout 6 python3 -I -c "$PROBE" "$1" "$2" 2>/dev/null; }
 probe_root() { timeout 6 python3 -I -c "$PROBE" "$1" "$2" 2>/dev/null; }
 
+# LISTEN: bind an ephemeral loopback port and listen. Prints "denied" if the
+# kernel refuses the bind (EPERM or EACCES), else "port N", then waits up to 8 s
+# for a connection to be accepted.
+LISTEN='
+import socket
+s = socket.socket()
+try:
+    s.bind(("127.0.0.1", 0))
+    s.listen(1)
+except PermissionError:
+    print("denied", flush=True)
+    raise SystemExit(0)
+except OSError as exc:
+    print("error:" + type(exc).__name__, flush=True)
+    raise SystemExit(0)
+print("port %d" % s.getsockname()[1], flush=True)
+s.settimeout(8)
+try:
+    s.accept()
+except OSError:
+    pass
+'
+# wait_for_port FILE: the first line the listener wrote, as "denied", an
+# "error:..." word or just the port number; empty after about 4 s of silence.
+wait_for_port() {
+    local i line
+    for i in 1 2 3 4 5 6 7 8; do
+        line=$(head -n 1 "$1" 2>/dev/null)
+        if [ -n "$line" ]; then
+            echo "${line#port }"
+            return
+        fi
+        sleep 0.5
+    done
+}
+
 DOCKER_SOCK=/var/run/docker.sock
 if [ ! -S "$DOCKER_SOCK" ]; then
     skip "cannot connect docker.sock" "no docker socket"
@@ -330,6 +366,41 @@ if have python3 && have timeout; then
     else
         skip "loopback service blocked (127.0.0.1:22)" "control: root cannot connect to 127.0.0.1:22"
     fi
+
+    # The agent must not be able to accept a connection (it could otherwise
+    # squat a localhost port that a reverse proxy points at). It binds and
+    # listens on an ephemeral loopback port; a connect from root must not get
+    # through. A bind refused with EPERM or EACCES also passes. The kernel
+    # completes a TCP handshake without accept(), so an "open" probe is enough.
+    LISTEN_TMP=$(mktemp -d)
+    chmod 0711 "$LISTEN_TMP"
+    : > "$LISTEN_TMP/root.out"
+    : > "$LISTEN_TMP/agent.out"
+    chmod 0666 "$LISTEN_TMP/agent.out"
+    # Control: the same listener run as root must be reachable, or an "open"
+    # versus "blocked" answer for the agent's listener means nothing.
+    timeout 12 python3 -I -c "$LISTEN" >"$LISTEN_TMP/root.out" 2>/dev/null &
+    root_pid=$!
+    ctl_port=$(wait_for_port "$LISTEN_TMP/root.out")
+    if [[ $ctl_port =~ ^[0-9]+$ ]] && [ "$(probe_root 127.0.0.1 "$ctl_port")" = open ]; then
+        as_agent timeout 12 python3 -I -c "$LISTEN" >"$LISTEN_TMP/agent.out" 2>/dev/null &
+        agent_pid=$!
+        got=$(wait_for_port "$LISTEN_TMP/agent.out")
+        name="agent cannot accept connections on a loopback port it listens on"
+        if [ "$got" = denied ]; then
+            pass "$name (bind refused)"
+        elif [[ $got =~ ^[0-9]+$ ]]; then
+            res=$(probe_root 127.0.0.1 "$got")
+            if [ "$res" = blocked ]; then pass "$name"; else fail "$name" "connect from root says ${res:-nothing}, want blocked"; fi
+        else
+            fail "$name" "listener did not start (${got:-no output})"
+        fi
+        wait "$agent_pid" 2>/dev/null
+    else
+        skip "agent cannot accept connections on a loopback port" "control: root cannot connect to its own listener"
+    fi
+    wait "$root_pid" 2>/dev/null
+    rm -rf "$LISTEN_TMP"
 
     gw=$(ip -4 route show default 2>/dev/null | awk '{for (i = 1; i < NF; i++) if ($i == "via") { print $(i + 1); exit }}')
     if [ -z "$gw" ]; then

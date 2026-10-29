@@ -27,6 +27,18 @@ ProtectControlGroups=yes
 ProtectHome=tmpfs
 BindPaths=/home/__AGENT__
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+# The agent may open connections but must never accept one: a listener on a
+# free localhost port that a reverse proxy points at would let it serve a public
+# hostname. These are enforced by the unit's cgroup (eBPF), so they survive an
+# `nft flush ruleset`, unlike egress.nft.
+#  - SocketBindDeny=any blocks bind() on any port 1-65535. Port 0 (an ephemeral
+#    port) is not covered by it, which is why the address filter below exists.
+#  - IPAddressDeny drops traffic to and from loopback, link-local, multicast and
+#    the private ranges, so a socket bound to an ephemeral port still cannot be
+#    reached. IPAddressAllow wins over Deny, so the DNS stub stays reachable.
+SocketBindDeny=any
+IPAddressDeny=localhost link-local multicast 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 100.64.0.0/10
+IPAddressAllow=127.0.0.53
 Restart=on-failure
 
 [Install]

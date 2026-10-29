@@ -37,6 +37,21 @@ the design assumes that uid is hostile and confines it.
   /var/lib/AGENT-broker, and cannot use cron, at, ssh or sudo.
 ```
 
+## Why inbound is blocked
+
+The agent may open connections but must never accept one. If it could listen on
+a free localhost port, and a reverse proxy on the box has an upstream pointing
+at that port (a site whose container is down, say), the agent could answer for
+that public hostname. Three layers stop it. The app unit sets
+`SocketBindDeny=any` (no bind to a numbered port), and `IPAddressDeny` for
+loopback, link-local, multicast and the private ranges, with the DNS stub
+allowed back in; both are enforced through the unit's cgroup and survive an
+`nft flush ruleset`. `SocketBindDeny` does not cover port 0, so a socket bound to
+an ephemeral port is stopped by the address filter instead. The nft policy adds
+a rule dropping any reply-direction packet that leaves from the agent uid, which
+can only come from a listening socket. `verify-confinement.sh` binds and listens
+as the agent, then tries to connect from root.
+
 ## Provisioning
 
 Run as root on the box, from a checkout of this repo. Set the agent name

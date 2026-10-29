@@ -11,6 +11,12 @@ table inet __AGENT___egress {
 	chain output {
 		type filter hook output priority 0; policy accept;
 
+		# The agent must never accept a connection. A packet in the reply
+		# direction that leaves from this uid can only come from a socket it is
+		# listening on, so drop it before the established rule below lets it out.
+		# This stops the agent squatting a localhost port a reverse proxy points at.
+		meta skuid "__AGENT__" ct direction reply drop
+
 		meta skuid "__AGENT__" ct state established,related accept
 
 		# The agent is IPv4 only. The v6 range drops further down stay as
