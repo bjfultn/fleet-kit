@@ -124,7 +124,7 @@ class BrokerCase(unittest.TestCase):
 
     def make(self, **over):
         b = bk.Broker(make_config(self.tmp, **over), self.discord, clock=lambda: self.now)
-        b.poll_interval = 0.01
+        b.poll_backoff = (0.01,)
         return b
 
     def tickets_on_disk(self):
@@ -519,6 +519,46 @@ class TestAsk(BrokerCase):
         self.assertEqual(t["reply"], "part one\npart two\npart three")
         self.assertEqual(self.tickets_on_disk()[0]["reply"], "part one\npart two\npart three")
 
+    def test_ask_polling_backs_off_3_6_then_10_seconds(self):
+        clock = {"t": 0.0}
+        sleeps = []
+
+        def sleep(secs):
+            sleeps.append(secs)
+            clock["t"] += secs
+
+        b = bk.Broker(make_config(self.tmp), self.discord, clock=lambda: self.now)
+        b.sleep = sleep
+        b.monotonic = lambda: clock["t"]
+        r = b.handle({"op": "ask", "agent": "cage", "text": "q", "wait": 60})
+        self.assertEqual(r["status"], "working")
+        self.assertEqual(sleeps[:5], [3.0, 6.0, 10.0, 10.0, 10.0])
+        self.assertAlmostEqual(sum(sleeps), 60.0)
+        polls = len(self.discord.message_calls)
+        self.assertEqual(polls, len(sleeps))
+        # three asks polling at once still leave lookup budget for read and check
+        self.assertLessEqual(3 * polls, b.cfg["lookups_per_minute"] - 5)
+
+    def test_check_without_a_ticket_shows_working_plus_five_recent_answers(self):
+        b = self.make()
+        for i in range(8):
+            b._tickets.append({"ticket": "a%d" % i, "agent": "cage", "channel_id": CAGE_CH,
+                               "ask_message_id": str(100 + i), "asked_at": self.now - 1000 + i,
+                               "status": "answered", "reply": "r%d" % i,
+                               "reply_message_ids": [], "expected_author_ids": [CAGE]})
+        b._tickets.append({"ticket": "w1", "agent": "cage", "channel_id": CAGE_CH,
+                           "ask_message_id": "200", "asked_at": self.now - 5000,
+                           "status": "working", "reply": None,
+                           "reply_message_ids": [], "expected_author_ids": [CAGE]})
+        out = b.handle({"op": "check"})
+        names = [t["ticket"] for t in out["tickets"]]
+        self.assertEqual(names, ["a7", "a6", "a5", "a4", "a3", "w1"])
+        self.assertEqual(out["omitted"], 3)
+        # naming a ticket still finds an old answered one
+        one = b.handle({"op": "check", "ticket": "a0"})
+        self.assertEqual([t["ticket"] for t in one["tickets"]], ["a0"])
+        self.assertNotIn("omitted", one)
+
     def test_ticket_records_expected_authors_and_captured_reply_ids(self):
         r = self.broker.handle({"op": "ask", "agent": "curtis", "text": "long one", "wait": 0})
         t = self.tickets_on_disk()[0]
@@ -852,7 +892,7 @@ class TestServer(BrokerCase):
     def serve(self, poll=0.05, **over):
         cfg = make_config(self.tmp, **over)
         broker = bk.Broker(cfg, self.discord)
-        broker.poll_interval = poll
+        broker.poll_backoff = (poll,)
         server = bk.make_server(broker, cfg)
         t = threading.Thread(target=server.serve_forever, daemon=True)
         t.start()

@@ -7,7 +7,7 @@ unix socket instead. One JSON line in, one JSON line out, per connection:
     post   {channel, text, reply_to?}      -> {ok, message_id}
     reply  {channel, message_id, text}     -> {ok, message_id}
     ask    {agent, text, wait?}            -> {ok, ticket, status, reply}
-    check  {ticket?}                       -> {ok, tickets: [...]}
+    check  {ticket?}                       -> {ok, tickets: [...], omitted?}
     read   {channel, n?}                   -> {ok, messages: [...]}
 
 Anything else, or any failure, is {"ok": false, "error": "plain sentence"}.
@@ -59,7 +59,7 @@ API_BASE = "https://discord.com/api/v10"
 USER_AGENT = "DiscordBot (https://example.invalid/fleet-kit, 1.0)"
 HTTP_TIMEOUT = 15
 MAX_WAIT = 120
-POLL_INTERVAL = 3.0
+POLL_BACKOFF = (3.0, 6.0, 10.0)   # seconds between an ask's polls; the last repeats
 READ_DEFAULT = 20
 READ_MAX = 50
 SETTLE_SECONDS = 4          # a reply's last chunk must be this old to count as complete
@@ -68,6 +68,7 @@ MAX_PAGES = 3
 MAX_TICKETS = 200
 CHECK_POLL_MAX = 5          # working tickets polled per check call
 CHECK_POLL_AGE = 24 * 3600  # older working tickets are listed but not polled
+CHECK_ANSWERED = 5          # answered tickets shown when check names no ticket
 MAX_ASKS = 3                # concurrent asks being waited on
 MAX_CONNS = 8               # concurrent connections served
 REQUEST_DEADLINE = 10       # seconds for the request line to arrive, wall-clock
@@ -340,8 +341,9 @@ class Broker:
         self.cfg = {**DEFAULTS, **config}
         self.discord = discord
         self.clock = clock
-        self.poll_interval = POLL_INTERVAL
+        self.poll_backoff = POLL_BACKOFF
         self.sleep = time.sleep
+        self.monotonic = time.monotonic
         self._log_fn = log
         self._lock = threading.Lock()
         self._log_lock = threading.Lock()
@@ -634,12 +636,17 @@ class Broker:
             self._persist()
         working = {"ticket": ticket["ticket"], "status": "working", "reply": None}
         try:
-            deadline = time.monotonic() + wait
+            deadline = self.monotonic() + wait
+            polls = 0
             while wait > 0:
-                remaining = deadline - time.monotonic()
+                remaining = deadline - self.monotonic()
                 if remaining <= 0:
                     break
-                self.sleep(min(self.poll_interval, remaining))
+                # Back off, so three open asks leave lookup budget for read and
+                # check: about 7 GETs a minute each, against a budget of 30.
+                gap = self.poll_backoff[min(polls, len(self.poll_backoff) - 1)]
+                polls += 1
+                self.sleep(min(gap, remaining))
                 try:
                     reply = self._poll(ticket)
                 except RateLimited:
@@ -708,14 +715,26 @@ class Broker:
                 errors[t["ticket"]] = str(exc)
         with self._lock:
             out = []
-            for t in sorted(rows, key=lambda t: t["asked_at"], reverse=True):
+            shown = sorted(rows, key=lambda t: t["asked_at"], reverse=True)
+            omitted = 0
+            if want is None:
+                # No ticket named: everything still working, plus the few most
+                # recent answers, not the whole backlog.
+                answered = [t for t in shown if t["status"] == "answered"]
+                keep = {id(t) for t in answered[:CHECK_ANSWERED]}
+                omitted = len(answered) - len(keep)
+                shown = [t for t in shown if t["status"] != "answered" or id(t) in keep]
+            for t in shown:
                 row = {"ticket": t["ticket"], "agent": t["agent"], "status": t["status"],
                        "reply": self._speak(t["reply"]) if t["reply"] else None,
                        "asked_at": t["asked_at"]}
                 if t["ticket"] in errors:
                     row["error"] = errors[t["ticket"]]
                 out.append(row)
-        return {"tickets": out}
+        result = {"tickets": out}
+        if omitted:
+            result["omitted"] = omitted
+        return result
 
     def _op_read(self, req):
         _, channel_id = self._channel(req.get("channel"))

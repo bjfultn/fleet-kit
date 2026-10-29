@@ -19,6 +19,7 @@ from unittest import mock
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, ".."))
 
+import broker as bk  # noqa: E402
 import team  # noqa: E402
 
 TEAM_PY = os.path.join(HERE, "..", "team.py")
@@ -110,7 +111,7 @@ class TeamTests(unittest.TestCase):
         request, timeout = fake.calls[0]
         self.assertEqual(request, {"op": "ask", "agent": "sonnet",
                                    "text": "hello there", "wait": 5})
-        self.assertEqual(timeout, 5 + 30)
+        self.assertEqual(timeout, team.ask_timeout(5))
 
     def test_ask_working_prints_ticket_hint(self):
         fake = FakeBroker({"ok": True, "ticket": "ab12cd34", "status": "working",
@@ -122,7 +123,7 @@ class TeamTests(unittest.TestCase):
         self.assertEqual(err, "")
         request, timeout = fake.calls[0]
         self.assertEqual(request["wait"], 60)
-        self.assertEqual(timeout, 60 + 30)
+        self.assertEqual(timeout, team.ask_timeout(60))
 
     def test_team_reports_broker_error(self):
         fake = FakeBroker({"ok": False, "error": "I don't know that agent."})
@@ -205,8 +206,33 @@ class TeamTests(unittest.TestCase):
 
     def test_no_answer_on_timeout(self):
         fake = FakeBroker(error=socket.timeout())
-        code, out, err = run(["ask", "sonnet", "hi"], fake)
+        code, out, err = run(["read", "general"], fake)
         self.assertEqual((code, out, err), (1, "", NO_ANSWER))
+
+    def test_ask_timeout_says_it_may_have_been_sent(self):
+        fake = FakeBroker(error=socket.timeout())
+        code, out, err = run(["ask", "sonnet", "hi"], fake)
+        self.assertEqual((code, out), (1, ""))
+        self.assertIn("may already have been sent", err)
+        self.assertIn("team check", err)
+
+    def test_ask_timeout_outlasts_the_brokers_worst_case(self):
+        # post, then the wait, then a final poll of MAX_PAGES Discord calls
+        for wait in (0, 1, 60, 80, 120, 500):
+            worst = (min(wait, bk.MAX_WAIT) + bk.HTTP_TIMEOUT
+                     + bk.MAX_PAGES * bk.HTTP_TIMEOUT)
+            self.assertGreater(team.ask_timeout(wait), worst, wait)
+        self.assertEqual((team.BROKER_HTTP_TIMEOUT, team.BROKER_MAX_PAGES,
+                          team.BROKER_MAX_WAIT),
+                         (bk.HTTP_TIMEOUT, bk.MAX_PAGES, bk.MAX_WAIT))
+
+    def test_check_says_how_many_older_answers_were_left_out(self):
+        fake = FakeBroker({"ok": True, "omitted": 4, "tickets": [
+            {"ticket": "t1", "agent": "cage", "status": "answered", "reply": "done"}]})
+        code, out, err = run(["check"], fake)
+        self.assertEqual(code, 0)
+        self.assertIn("t1 cage: done", out)
+        self.assertIn("4 older answered not shown", out)
 
     def test_timeouts_for_ask_and_other_ops(self):
         post = FakeBroker({"ok": True, "message_id": "1"})
@@ -214,7 +240,7 @@ class TeamTests(unittest.TestCase):
         self.assertEqual(post.calls[0][1], 30)
         ask = FakeBroker({"ok": True, "ticket": "t", "status": "working", "reply": None})
         run(["ask", "sonnet", "--wait", "10", "hi"], ask)
-        self.assertEqual(ask.calls[0][1], 10 + 30)
+        self.assertEqual(ask.calls[0][1], team.ask_timeout(10))
 
     def test_socket_path_default_and_override(self):
         with mock.patch.dict(os.environ, {}, clear=False) as env:
@@ -242,7 +268,7 @@ class TeamTests(unittest.TestCase):
         run(["ask", "sonnet", "--wait", "5", "-hello", "there"], ask)
         self.assertEqual(ask.calls[0][0], {"op": "ask", "agent": "sonnet",
                                            "text": "-hello there", "wait": 5})
-        self.assertEqual(ask.calls[0][1], 5 + 30)
+        self.assertEqual(ask.calls[0][1], team.ask_timeout(5))
         run(["ask", "sonnet", "--wait=7", "hi"], ask)
         self.assertEqual(ask.calls[1][0]["wait"], 7)
         self.assertEqual(ask.calls[1][0]["text"], "hi")

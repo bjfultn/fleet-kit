@@ -26,11 +26,23 @@ import sys
 DEFAULT_SOCKET = "/run/grokbot-broker/team.sock"
 DEFAULT_WAIT = 60
 OP_TIMEOUT = 30          # seconds, for every op that is not ask
-WAIT_SLACK = 30          # seconds added to an ask's wait for the round trip
+
+# The broker's worst case for an ask is: the post (one Discord call, up to
+# BROKER_HTTP_TIMEOUT), then the wait (the broker clamps it to BROKER_MAX_WAIT),
+# then a final poll that began just before the deadline and can make
+# BROKER_MAX_PAGES Discord calls. These mirror HTTP_TIMEOUT, MAX_WAIT and
+# MAX_PAGES in broker.py (a test keeps them in step). The margin covers the
+# socket round trip and a loaded box.
+BROKER_HTTP_TIMEOUT = 15
+BROKER_MAX_WAIT = 120
+BROKER_MAX_PAGES = 3
+ASK_MARGIN = 15
 
 NOT_RUNNING = "team: the team helper isn't running"
 BUSY = "team: the team helper is busy, try again in a moment"
 NO_ANSWER = "team: no answer from the team helper"
+NO_ANSWER_ASK = ("team: no answer from the team helper in time. The ask may already "
+                 "have been sent. Run: team check")
 
 
 def socket_path():
@@ -63,6 +75,12 @@ def _text(words):
     return " ".join(words)
 
 
+def ask_timeout(wait):
+    """Seconds the client will wait for the broker to answer an ask."""
+    return (max(0, min(wait, BROKER_MAX_WAIT)) + BROKER_HTTP_TIMEOUT
+            + BROKER_MAX_PAGES * BROKER_HTTP_TIMEOUT + ASK_MARGIN)
+
+
 def _build(args):
     """Turn parsed args into (request, timeout) for the broker."""
     op = args.op
@@ -73,7 +91,7 @@ def _build(args):
                  "text": _text(args.text)}, OP_TIMEOUT)
     if op == "ask":
         return ({"op": "ask", "agent": args.agent, "text": _text(args.text),
-                 "wait": args.wait}, args.wait + WAIT_SLACK)
+                 "wait": args.wait}, ask_timeout(args.wait))
     if op == "check":
         req = {"op": "check"}
         if args.ticket is not None:
@@ -198,7 +216,7 @@ def _format_ask(resp):
                                                              resp.get("ticket"))
 
 
-def _format_check(rows):
+def _format_check(rows, omitted=0):
     if not rows:
         return "No open questions."
     lines = []
@@ -210,6 +228,8 @@ def _format_check(rows):
             lines.append("%s couldn't check (%s)" % (head, row["error"]))
         else:
             lines.append("%s still working" % head)
+    if omitted:
+        lines.append("%d older answered not shown. Run: team check TICKET" % omitted)
     return "\n".join(lines)
 
 
@@ -224,7 +244,7 @@ def _format_ok(op, resp):
     if op == "ask":
         return _format_ask(resp)
     if op == "check":
-        return _format_check(resp.get("tickets") or [])
+        return _format_check(resp.get("tickets") or [], resp.get("omitted") or 0)
     if op == "read":
         return _format_read(resp.get("messages") or [])
     return "Sent."
@@ -243,7 +263,7 @@ def main(argv, connect=None):
     except (ConnectionResetError, BrokenPipeError):
         return _fail(BUSY)
     except (socket.timeout, TimeoutError):
-        return _fail(NO_ANSWER)
+        return _fail(NO_ANSWER_ASK if args.op == "ask" else NO_ANSWER)
     except OSError:
         # Anything else from the socket (an over-long socket path, say) means
         # the helper can't be reached.

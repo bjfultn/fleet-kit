@@ -633,8 +633,12 @@ def main():
 
     while True:
         try:
-            poll()
-            GROK.drain()
+            try:
+                poll()
+            finally:
+                # A poll() that raises must not leave held Grok Bot messages
+                # waiting. drain() contains its own per-agent errors.
+                GROK.drain()
             heartbeat()
         except KeyboardInterrupt:
             log("Shutting down")

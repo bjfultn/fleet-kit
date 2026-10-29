@@ -916,5 +916,24 @@ class WakerTests(unittest.TestCase):
             self.assertEqual(text.count("none.json"), 2)   # a and c, unreadable
 
 
+class WatcherLoopTests(unittest.TestCase):
+    def test_drain_runs_in_a_finally_after_poll(self):
+        # mention-watcher.py has import-time side effects, so check its shape.
+        import ast
+        path = os.path.join(HERE, "..", "..", "..", "bin", "mention-watcher.py")
+        with open(path) as fh:
+            tree = ast.parse(fh.read())
+        main = next(n for n in ast.walk(tree)
+                    if isinstance(n, ast.FunctionDef) and n.name == "main")
+
+        def calls(nodes):
+            return {ast.unparse(c.func) for n in nodes for c in ast.walk(n)
+                    if isinstance(c, ast.Call)}
+
+        guarded = [t for t in ast.walk(main) if isinstance(t, ast.Try)
+                   and "poll" in calls(t.body) and "GROK.drain" in calls(t.finalbody)]
+        self.assertTrue(guarded, "GROK.drain() must run in a finally around poll()")
+
+
 if __name__ == "__main__":
     unittest.main()
