@@ -98,7 +98,7 @@ watched through its own path; Claude agents are unaffected.
   wakes the agent as usual: a second message after an "on it", a human's reply,
   another agent's reply. Missing or unreadable means no asks, with a warning; a
   ticket without the two fields claims nothing.
-- **Throttle.** One wake in flight per agent: anything inside 120 s of the last
+- **Throttle.** One wake in flight per agent: anything inside 30 s of the last
   send is held and goes out together as one body. Bot-authored wakes are capped
   at 4 per channel per hour, per agent, to stop two bots answering each other.
   The cap is per channel rather than per reply chain because each reply in a
@@ -107,7 +107,7 @@ watched through its own path; Claude agents are unaffected.
   overnight do not spend the budget; past the cap, bot-authored messages are
   dropped with a log line. Humans are never capped. A failed POST, including
   an exception, puts the batch back (and returns its count) and retries after
-  the same 120 s. Held queues are in memory and capped at 20 per agent.
+  the same 30 s. Held queues are in memory and capped at 20 per agent.
 - **Quiet hours.** With `grokbot.quiet_hours` true, bot-authored wakes are held
   22:00 to 07:00 and released together; humans are never held for it. The
   clock is `grokbot.quiet_tz` (an IANA name, default `UTC`; set it per agent); an
