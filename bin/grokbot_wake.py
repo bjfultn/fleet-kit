@@ -83,17 +83,22 @@ def build_payload(msg: dict, channel_id: str) -> dict:
 
 # ── Who may wake the agent ──────────────────────────────────────────────────
 
+# Matches the broker's CHECK_POLL_AGE: a working ticket older than this is no
+# longer polled, so its expected authors' replies are not held back.
+WORKING_HOLD = 24 * 3600
+
 class Ask:
     """What the broker's ticket file says about one ask: the reply message ids
     it consumed, whether the ticket is still working, and whose replies it
     would consume. Missing fields (an older broker) mean nothing is claimed."""
 
-    __slots__ = ("reply_ids", "working", "authors")
+    __slots__ = ("reply_ids", "working", "authors", "asked_at")
 
-    def __init__(self, reply_ids=(), working=False, authors=()):
+    def __init__(self, reply_ids=(), working=False, authors=(), asked_at=None):
         self.reply_ids = frozenset(str(i) for i in reply_ids)
         self.working = bool(working)
         self.authors = frozenset(str(a) for a in authors)
+        self.asked_at = asked_at
 
     def captured(self, message_id: str, author_id: str) -> bool:
         """Did, or will, the broker consume this reply?
@@ -104,7 +109,11 @@ class Ask:
         """
         if message_id in self.reply_ids:
             return True
-        return self.working and author_id in self.authors
+        if not (self.working and author_id in self.authors):
+            return False
+        # The broker stops polling a working ticket after WORKING_HOLD, so
+        # past that nobody will collect the reply: let it wake the agent.
+        return self.asked_at is None or time.time() - self.asked_at < WORKING_HOLD
 
 
 def grokbot_targets(msg: dict, channel_id: str, agent: dict, asks: dict) -> bool:
@@ -188,7 +197,8 @@ class TicketReader:
                     asks[str(t["ask_message_id"])] = Ask(
                         t.get("reply_message_ids") or (),
                         t.get("status") == "working",
-                        t.get("expected_author_ids") or ())
+                        t.get("expected_author_ids") or (),
+                        t.get("asked_at"))
                 self._asks = asks
                 self._stamp = stamp
             return dict(self._asks)

@@ -11,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 import urllib.error
 import urllib.request
@@ -376,6 +377,15 @@ class TargetTests(unittest.TestCase):
         a = agent(allow_bots={TEAMBOT, other_bot})
         asks = {ask: gw.Ask(working=True, authors={TEAMBOT})}
         self.assertTrue(gw.grokbot_targets(m, PRIVATE, a, asks))
+
+    def test_stale_working_ticket_does_not_hold_replies(self):
+        # Past the broker's polling window nobody collects the reply.
+        ask = "800000000000000001"
+        m = msg(author=TEAMBOT, mentions=[BOT], reply_to=ask, bot=True)
+        stale = gw.Ask(working=True, authors={TEAMBOT}, asked_at=time.time() - gw.WORKING_HOLD - 60)
+        self.assertTrue(gw.grokbot_targets(m, PRIVATE, agent(), {ask: stale}))
+        fresh = gw.Ask(working=True, authors={TEAMBOT}, asked_at=time.time() - 60)
+        self.assertFalse(gw.grokbot_targets(m, PRIVATE, agent(), {ask: fresh}))
 
     def test_working_ticket_and_expected_author_is_suppressed(self):
         ask = "800000000000000001"
