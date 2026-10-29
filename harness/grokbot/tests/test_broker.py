@@ -5,6 +5,7 @@ for the REST client; the Discord class itself is tested through an injected
 opener, and the socket server is exercised for real on a temp unix socket.
 """
 
+import contextlib
 import io
 import json
 import os
@@ -616,6 +617,66 @@ class TestAsk(BrokerCase):
         self.assertIn("post", lines[0])
         self.assertIn("general", lines[0])
         self.assertIn("ok", lines[0])
+
+
+class TestLogging(BrokerCase):
+    def logged(self, **over):
+        lines = []
+        b = bk.Broker(make_config(self.tmp, **over), self.discord,
+                      clock=lambda: self.now, log=lines.append)
+        return b, lines
+
+    def test_no_log_file_logs_to_stderr(self):
+        b = self.make(log_file=None)
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            b.handle({"op": "post", "channel": "general", "text": "hello"})
+        self.assertEqual(len(err.getvalue().splitlines()), 1)
+        self.assertIn("post general len=5 ok", err.getvalue())
+        self.assertFalse(os.path.exists(os.path.join(self.tmp, "broker.log")))
+
+    def test_log_file_still_supported(self):
+        self.broker.handle({"op": "post", "channel": "general", "text": "hello"})
+        with open(os.path.join(self.tmp, "broker.log")) as fh:
+            self.assertIn("post general", fh.read())
+
+    def test_repeated_error_lines_collapse_within_a_minute(self):
+        b, lines = self.logged()
+        for _ in range(50):
+            b.handle({"op": "bogus"})
+        self.assertEqual(len(lines), 1)
+        self.assertIn("unknown", lines[0])
+        self.now += 59
+        b.handle({"op": "bogus"})
+        self.assertEqual(len(lines), 1)
+        self.now += 2          # 61 s after the first line
+        b.handle({"op": "bogus"})
+        self.assertEqual(len(lines), 2)
+        self.assertTrue(lines[1].endswith("(suppressed 50)"), lines[1])
+        # no suppression note when nothing was held back
+        self.now += 120
+        b.handle({"op": "bogus"})
+        self.assertEqual(len(lines), 3)
+        self.assertNotIn("suppressed", lines[2])
+
+    def test_distinct_errors_and_ok_lines_are_not_collapsed(self):
+        b, lines = self.logged()
+        for _ in range(3):
+            b.handle({"op": "post", "channel": "general", "text": "hi"})
+        b.handle({"op": "post", "channel": "nope", "text": "hi"})
+        b.handle({"op": "read", "channel": "nope"})
+        b.handle({"op": "post", "channel": "nope", "text": "hi"})
+        ok = [ln for ln in lines if " ok" in ln]
+        errors = [ln for ln in lines if " error" in ln]
+        self.assertEqual(len(ok), 3)
+        self.assertEqual(len(errors), 2)
+
+    def test_repeat_table_stays_bounded(self):
+        b, _ = self.logged()
+        for i in range(bk.LOG_REPEAT_KEYS + 50):
+            b.handle({"op": "post", "channel": "no-such-%d" % i, "text": "x"})
+            self.now += 1
+        self.assertLessEqual(len(b._repeats), bk.LOG_REPEAT_KEYS + 1)
 
 
 class TestRead(BrokerCase):

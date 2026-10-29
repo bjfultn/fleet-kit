@@ -28,7 +28,9 @@ call or the wait in `ask`, so a slow ask cannot stall a read.
 
 Stdlib only. The token is read once at startup and appears in no log line, no
 exception and no repr. Logs carry op, target, text length and ok/error, never
-message bodies.
+message bodies. They go to stderr (the journal) unless the config names a
+log_file; an identical error line is written at most once a minute, with a
+count of the ones held back.
 """
 
 import argparse
@@ -69,6 +71,8 @@ CHECK_POLL_AGE = 24 * 3600  # older working tickets are listed but not polled
 MAX_ASKS = 3                # concurrent asks being waited on
 MAX_CONNS = 8               # concurrent connections served
 REQUEST_DEADLINE = 10       # seconds for the request line to arrive, wall-clock
+LOG_REPEAT_WINDOW = 60      # an identical error line is logged once per this many seconds
+LOG_REPEAT_KEYS = 256       # distinct error lines remembered before old ones are swept
 
 DEFAULTS = {
     "rate_per_minute": 6,
@@ -329,6 +333,7 @@ class Broker:
         self._log_fn = log
         self._lock = threading.Lock()
         self._log_lock = threading.Lock()
+        self._repeats = {}       # error line body -> [first seen, suppressed count]
         self._sent = deque()     # outgoing message times, for the rate limit
         self._gets = deque()     # Discord GET times, for the lookup budget
         self._asks = 0           # asks currently waiting for an answer
@@ -437,19 +442,37 @@ class Broker:
     # -- logging --
 
     def _log(self, op, target, length, ok, note=None):
-        line = "%s %s %s len=%d %s" % (
-            datetime.fromtimestamp(self.clock(), timezone.utc).isoformat(timespec="seconds"),
-            op, target or "-", length, "ok" if ok else "error")
+        now = self.clock()
+        body = "%s %s len=%d %s" % (op, target or "-", length, "ok" if ok else "error")
         if note:
-            line += " " + note
+            body += " " + note
+        suffix = ""
+        if not ok:
+            with self._log_lock:
+                seen = self._repeats.get(body)
+                if seen is not None and now - seen[0] < LOG_REPEAT_WINDOW:
+                    seen[1] += 1
+                    return
+                if seen is not None and seen[1]:
+                    suffix = " (suppressed %d)" % seen[1]
+                self._repeats[body] = [now, 0]
+                if len(self._repeats) > LOG_REPEAT_KEYS:
+                    for key in [k for k, v in self._repeats.items()
+                                if now - v[0] >= LOG_REPEAT_WINDOW]:
+                        del self._repeats[key]
+        line = "%s %s%s" % (datetime.fromtimestamp(now, timezone.utc).isoformat(timespec="seconds"),
+                            body, suffix)
         if self._log_fn:
             self._log_fn(line)
             return
         path = self.cfg.get("log_file")
-        if not path:
-            return
         try:
             with self._log_lock:
+                if not path:
+                    # Default: stderr, which systemd sends to the journal. The
+                    # journal's own limits (MaxRetentionSec, SystemMaxUse) bound it.
+                    print(line, file=sys.stderr, flush=True)
+                    return
                 fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o640)
                 with os.fdopen(fd, "a") as fh:
                     fh.write(line + "\n")

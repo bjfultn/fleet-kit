@@ -114,23 +114,29 @@ shell history.
 
 ```
 install -d -m 0750 -o "$AGENT-broker" -g "$AGENT-broker" "/etc/$AGENT-broker"
-install -m 0640 -o root -g "$AGENT-broker" harness/grokbot/broker.example.json "/etc/$AGENT-broker/broker.json"
+sed "s/__AGENT__/$AGENT/g" harness/grokbot/broker.example.json \
+  | install -m 0640 -o root -g "$AGENT-broker" /dev/stdin "/etc/$AGENT-broker/broker.json"
 read -rsp 'Discord bot token: ' TOKEN; echo
 printf '%s' "$TOKEN" | install -m 0600 -o "$AGENT-broker" -g "$AGENT-broker" /dev/stdin "/etc/$AGENT-broker/token"
 unset TOKEN
 ```
 
-Edit `/etc/$AGENT-broker/broker.json`: your channel and agent ids, plus these
-values.
+Edit `/etc/$AGENT-broker/broker.json`: your channel and agent ids, and
+`allowed_uid` (the output of `id -u "$AGENT"`). The example already carries the
+paths this guide uses, with the agent name filled in:
 
 ```
 "token_file":    "/etc/AGENT-broker/token"
-"allowed_uid":   <output of: id -u AGENT>
 "socket":        "/run/AGENT-broker/team.sock"
 "socket_group":  "AGENT"
 "state_dir":     "/var/lib/AGENT-broker"
-"log_file":      "/var/log/AGENT-broker/broker.log"
 ```
+
+There is no `log_file`. The broker writes its log to stderr, which the unit
+sends to the journal, so retention is the journal's: set `MaxRetentionSec` and
+`SystemMaxUse` in `journald.conf` to taste. A `log_file` key is still honoured
+if you want a file, but then rotating it is on you. An identical error line is
+logged at most once a minute, with a count of the ones held back.
 
 7. Create the state directory and let the operator's watcher read tickets. The
 operator can traverse the directory and read files in it, but not list it. This
@@ -238,7 +244,7 @@ Delete the users and data. Kill the agent's leftover processes first. Keep
 pkill -u "$AGENT"
 userdel -r "$AGENT"
 userdel "$AGENT-broker"
-rm -rf "/etc/$AGENT-broker" "/var/lib/$AGENT-broker" "/var/log/$AGENT-broker" "/usr/local/lib/$AGENT-broker"
+rm -rf "/etc/$AGENT-broker" "/var/lib/$AGENT-broker" "/usr/local/lib/$AGENT-broker"
 rm -f /usr/local/bin/team
 ```
 

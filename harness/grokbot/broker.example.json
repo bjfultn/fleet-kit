@@ -1,6 +1,6 @@
 {
   "channels": {
-    "albert": "111111111111111101",
+    "nova": "111111111111111101",
     "general": "111111111111111102",
     "curtis": "111111111111111103",
     "sonnet": "111111111111111104",
@@ -14,12 +14,11 @@
     "reid": {"bot_id": "111111111111111114", "channel": "reid"}
   },
   "router": "sonnet",
-  "token_file": "/var/lib/example-broker/token",
+  "token_file": "/etc/__AGENT__-broker/token",
   "allowed_uid": 1001,
-  "socket": "/var/lib/example-broker/broker.sock",
-  "socket_group": "example",
-  "state_dir": "/var/lib/example-broker/state",
-  "log_file": "/var/lib/example-broker/broker.log",
+  "socket": "/run/__AGENT__-broker/team.sock",
+  "socket_group": "__AGENT__",
+  "state_dir": "/var/lib/__AGENT__-broker",
   "rate_per_minute": 6,
   "max_len": 1800,
   "ask_wait": 60,
