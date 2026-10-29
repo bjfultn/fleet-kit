@@ -518,6 +518,36 @@ class TestAsk(BrokerCase):
         self.assertEqual(t["reply"], "part one\npart two\npart three")
         self.assertEqual(self.tickets_on_disk()[0]["reply"], "part one\npart two\npart three")
 
+    def test_ticket_records_expected_authors_and_captured_reply_ids(self):
+        r = self.broker.handle({"op": "ask", "agent": "curtis", "text": "long one", "wait": 0})
+        t = self.tickets_on_disk()[0]
+        self.assertEqual(t["expected_author_ids"], [CURTIS])
+        self.assertEqual(t["reply_message_ids"], [])
+        ask_id = self.discord.posts[0]["id"]
+        a = self.discord.add(CURTIS_CH, CURTIS, "part one", reply_to=ask_id)
+        b = self.discord.add(CURTIS_CH, CURTIS, "part two")
+        self.broker.handle({"op": "check", "ticket": r["ticket"]})
+        t = self.tickets_on_disk()[0]
+        self.assertEqual(t["status"], "answered")
+        self.assertEqual(t["reply_message_ids"], [a["id"], b["id"]])
+
+    def test_team_ticket_expects_every_fleet_agent(self):
+        self.broker.handle({"op": "ask", "agent": "team", "text": "anyone", "wait": 0})
+        self.assertEqual(self.tickets_on_disk()[0]["expected_author_ids"],
+                         sorted([SONNET, CURTIS, CAGE]))
+
+    def test_old_ticket_without_the_new_fields_loads(self):
+        os.makedirs(os.path.join(self.tmp, "state"), exist_ok=True)
+        with open(os.path.join(self.tmp, "state", "tickets.json"), "w") as fh:
+            json.dump({"tickets": [{"ticket": "old1", "agent": "cage", "channel_id": CAGE_CH,
+                                    "ask_message_id": "5", "asked_at": self.now,
+                                    "status": "working", "reply": None}]}, fh)
+        b = self.make()
+        self.assertEqual(b._tickets[0]["reply_message_ids"], [])
+        self.assertEqual(b._tickets[0]["expected_author_ids"], [])
+        self.assertEqual(b.handle({"op": "check", "ticket": "old1"})["tickets"][0]["status"],
+                         "working")
+
     def test_split_reply_stops_at_other_author(self):
         msgs = [
             {"id": "1", "content": "ask", "author": {"id": "8"}},

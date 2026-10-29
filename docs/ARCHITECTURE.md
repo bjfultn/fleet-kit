@@ -89,9 +89,15 @@ watched through its own path; Claude agents are unaffected.
   wakes it, since everything there does; in any other channel it does not.
 - **What wakes it.** A user mention of its bot id, or any message in its private
   channel. `@everyone`, `@here` and role tags do not count as a tag. Its own
-  messages never wake it, and neither does a reply to one of its own asks, read from the broker's
-  `tickets_file` (`{"tickets": [{"ask_message_id": ...}]}`, read-only; missing
-  or unreadable means no asks, with a warning).
+  messages never wake it. Nor does a reply the broker has taken for one of its
+  own asks. The broker records what it consumed in `tickets_file`
+  (`{"tickets": [{"ask_message_id", "status", "reply_message_ids",
+  "expected_author_ids", ...}]}`, read-only here). A reply to an ask is held
+  back only if its id is in that ticket's `reply_message_ids`, or the ticket is
+  still `working` and the author is in `expected_author_ids`. Everything else
+  wakes the agent as usual: a second message after an "on it", a human's reply,
+  another agent's reply. Missing or unreadable means no asks, with a warning; a
+  ticket without the two fields claims nothing.
 - **Throttle.** One wake in flight per agent: anything inside 120 s of the last
   send is held and goes out together as one body. Bot-authored wakes are capped
   at 4 per channel per hour, per agent, to stop two bots answering each other.

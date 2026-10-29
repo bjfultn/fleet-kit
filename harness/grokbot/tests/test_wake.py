@@ -214,33 +214,33 @@ class WebhookTests(unittest.TestCase):
 class TargetTests(unittest.TestCase):
     def test_tag_wakes(self):
         m = msg(mentions=[BOT])
-        self.assertTrue(gw.grokbot_targets(m, GENERAL, agent(), set()))
+        self.assertTrue(gw.grokbot_targets(m, GENERAL, agent(), {}))
 
     def test_private_channel_untagged_wakes(self):
-        self.assertTrue(gw.grokbot_targets(msg(), PRIVATE, agent(), set()))
+        self.assertTrue(gw.grokbot_targets(msg(), PRIVATE, agent(), {}))
 
     def test_bot_author_on_allow_bots_wakes(self):
         m = msg(author=TEAMBOT, mentions=[BOT], bot=True)
-        self.assertTrue(gw.grokbot_targets(m, GENERAL, agent(), set()))
+        self.assertTrue(gw.grokbot_targets(m, GENERAL, agent(), {}))
 
     def test_own_message_never_wakes(self):
         m = msg(author=BOT, mentions=[BOT], bot=True)
         a = agent(allow_bots={TEAMBOT, BOT})
-        self.assertFalse(gw.grokbot_targets(m, PRIVATE, a, set()))
+        self.assertFalse(gw.grokbot_targets(m, PRIVATE, a, {}))
 
     def test_other_channel_untagged_does_not_wake(self):
-        self.assertFalse(gw.grokbot_targets(msg(), GENERAL, agent(), set()))
+        self.assertFalse(gw.grokbot_targets(msg(), GENERAL, agent(), {}))
 
     def test_everyone_does_not_wake(self):
-        self.assertFalse(gw.grokbot_targets(msg(everyone=True), GENERAL, agent(), set()))
+        self.assertFalse(gw.grokbot_targets(msg(everyone=True), GENERAL, agent(), {}))
 
     def test_role_tag_does_not_wake(self):
         self.assertFalse(gw.grokbot_targets(msg(roles=["888888888888888888"]),
-                                            GENERAL, agent(), set()))
+                                            GENERAL, agent(), {}))
 
     def test_tag_of_someone_else_does_not_wake(self):
         self.assertFalse(gw.grokbot_targets(msg(mentions=["999999999999999999"]),
-                                            GENERAL, agent(), set()))
+                                            GENERAL, agent(), {}))
 
     def test_grokbot_enforces_allowlist_when_watcher_enforce_off(self):
         old = os.environ.get("MENTION_WATCHER_ENFORCE")
@@ -248,10 +248,10 @@ class TargetTests(unittest.TestCase):
         try:
             # unlisted author in the private channel
             self.assertFalse(gw.grokbot_targets(
-                msg(author=STRANGER, mentions=[BOT]), PRIVATE, agent(), set()))
+                msg(author=STRANGER, mentions=[BOT]), PRIVATE, agent(), {}))
             # allowed author, tagged, but in a channel the agent cannot see
             self.assertFalse(gw.grokbot_targets(
-                msg(author=HUMAN, mentions=[BOT]), OTHER, agent(), set()))
+                msg(author=HUMAN, mentions=[BOT]), OTHER, agent(), {}))
         finally:
             if old is None:
                 del os.environ["MENTION_WATCHER_ENFORCE"]
@@ -260,20 +260,63 @@ class TargetTests(unittest.TestCase):
 
     def test_empty_allowlists_fail_closed(self):
         a = agent(allowed_channels=set(), allow_from=set(), allow_bots=set())
-        self.assertFalse(gw.grokbot_targets(msg(mentions=[BOT]), PRIVATE, a, set()))
+        self.assertFalse(gw.grokbot_targets(msg(mentions=[BOT]), PRIVATE, a, {}))
 
     def test_reply_to_albert_ask_does_not_wake(self):
+        # a reply the broker recorded as consumed does not wake
         ask = "800000000000000001"
         m = msg(author=TEAMBOT, mentions=[BOT], reply_to=ask, bot=True)
-        self.assertFalse(gw.grokbot_targets(m, PRIVATE, agent(), {ask}))
+        asks = {ask: gw.Ask(reply_ids={m["id"]}, working=False, authors={TEAMBOT})}
+        self.assertFalse(gw.grokbot_targets(m, PRIVATE, agent(), asks))
         # a reply to some other message still wakes
-        m2 = msg(author=TEAMBOT, mentions=[BOT], reply_to="800000000000000002", bot=True)
-        self.assertTrue(gw.grokbot_targets(m2, PRIVATE, agent(), {ask}))
+        m2 = msg(author=TEAMBOT, mid="900000000000000002", mentions=[BOT],
+                 reply_to="800000000000000002", bot=True)
+        self.assertTrue(gw.grokbot_targets(m2, PRIVATE, agent(), asks))
+
+    def test_on_it_then_result_second_reply_wakes(self):
+        ask = "800000000000000001"
+        first = msg(author=TEAMBOT, mid="900000000000000001", mentions=[BOT],
+                    reply_to=ask, bot=True, content="on it")
+        later = msg(author=TEAMBOT, mid="900000000000000009", mentions=[BOT],
+                    reply_to=ask, bot=True, content="here is the result")
+        # the broker captured "on it" and closed the ticket
+        asks = {ask: gw.Ask(reply_ids={first["id"]}, working=False, authors={TEAMBOT})}
+        self.assertFalse(gw.grokbot_targets(first, PRIVATE, agent(), asks))
+        self.assertTrue(gw.grokbot_targets(later, PRIVATE, agent(), asks))
+
+    def test_human_reply_to_ask_wakes(self):
+        ask = "800000000000000001"
+        m = msg(author=HUMAN, mentions=[BOT], reply_to=ask)
+        # even while the ticket is working: a human is not an expected author
+        asks = {ask: gw.Ask(working=True, authors={TEAMBOT})}
+        self.assertTrue(gw.grokbot_targets(m, PRIVATE, agent(), asks))
+
+    def test_non_target_agent_reply_wakes(self):
+        ask = "800000000000000001"
+        other_bot = "888888888888888888"
+        m = msg(author=other_bot, mentions=[BOT], reply_to=ask, bot=True)
+        a = agent(allow_bots={TEAMBOT, other_bot})
+        asks = {ask: gw.Ask(working=True, authors={TEAMBOT})}
+        self.assertTrue(gw.grokbot_targets(m, PRIVATE, a, asks))
+
+    def test_working_ticket_and_expected_author_is_suppressed(self):
+        ask = "800000000000000001"
+        m = msg(author=TEAMBOT, mentions=[BOT], reply_to=ask, bot=True)
+        asks = {ask: gw.Ask(working=True, authors={TEAMBOT})}
+        self.assertFalse(gw.grokbot_targets(m, PRIVATE, agent(), asks))
+        # the same message once the ticket is answered without it: wakes
+        asks = {ask: gw.Ask(working=False, authors={TEAMBOT})}
+        self.assertTrue(gw.grokbot_targets(m, PRIVATE, agent(), asks))
+
+    def test_old_ticket_without_fields_claims_nothing(self):
+        ask = "800000000000000001"
+        m = msg(author=TEAMBOT, mentions=[BOT], reply_to=ask, bot=True)
+        self.assertTrue(gw.grokbot_targets(m, PRIVATE, agent(), {ask: gw.Ask()}))
 
     def test_everyone_in_private_channel_wakes_but_not_in_general(self):
         # a human @everyone in the agent's own channel is addressed to it
-        self.assertTrue(gw.grokbot_targets(msg(everyone=True), PRIVATE, agent(), set()))
-        self.assertFalse(gw.grokbot_targets(msg(everyone=True), GENERAL, agent(), set()))
+        self.assertTrue(gw.grokbot_targets(msg(everyone=True), PRIVATE, agent(), {}))
+        self.assertFalse(gw.grokbot_targets(msg(everyone=True), GENERAL, agent(), {}))
 
 
 class TicketTests(unittest.TestCase):
@@ -289,13 +332,42 @@ class TicketTests(unittest.TestCase):
                 ]}, fh)
             self.assertEqual(gw.TicketReader(p, lambda s: None).ask_ids(), {"11", "12"})
 
+    def test_reads_reply_ids_status_and_authors(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "tickets.json")
+            with open(p, "w") as fh:
+                json.dump({"tickets": [
+                    {"ticket": "t1", "ask_message_id": "11", "status": "working",
+                     "reply_message_ids": [], "expected_author_ids": [TEAMBOT]},
+                    {"ticket": "t2", "ask_message_id": "12", "status": "answered",
+                     "reply_message_ids": ["21", "22"], "expected_author_ids": [TEAMBOT]},
+                    {"ticket": "t3", "ask_message_id": "13", "status": "working"},
+                ]}, fh)
+            asks = gw.TicketReader(p, lambda s: None).asks()
+            self.assertTrue(asks["11"].working)
+            self.assertEqual(asks["11"].authors, {TEAMBOT})
+            self.assertEqual(asks["12"].reply_ids, {"21", "22"})
+            self.assertFalse(asks["12"].working)
+            # an old ticket with neither field claims nothing
+            self.assertFalse(asks["13"].captured("99", TEAMBOT))
+
+    def test_rewritten_file_is_picked_up(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "tickets.json")
+            r = gw.TicketReader(p, lambda s: None)
+            for status in ("working", "answered"):
+                with open(p + ".new", "w") as fh:
+                    json.dump({"tickets": [{"ask_message_id": "11", "status": status}]}, fh)
+                os.rename(p + ".new", p)
+                self.assertEqual(r.asks()["11"].working, status == "working")
+
     def test_missing_or_garbage_file_is_empty_and_logs_once_per_interval(self):
         logs = []
         clock = FakeClock()
         with tempfile.TemporaryDirectory() as d:
             r = gw.TicketReader(os.path.join(d, "none.json"), logs.append, clock)
             self.assertEqual(r.ask_ids(), set())
-            self.assertEqual(r.ask_ids(), set())
+            self.assertEqual(r.asks(), {})
             clock.t += gw.TICKET_WARN_INTERVAL - 1
             self.assertEqual(r.ask_ids(), set())
             self.assertEqual(len(logs), 1)
@@ -510,7 +582,7 @@ class LoaderTests(unittest.TestCase):
             _, groks, channels = gw.load_fleet_agents(root)
             g = groks["gizmo"]
             self.assertEqual(g["allowed_channels"], set())
-            self.assertFalse(gw.grokbot_targets(msg(mentions=[BOT]), PRIVATE, g, set()))
+            self.assertFalse(gw.grokbot_targets(msg(mentions=[BOT]), PRIVATE, g, {}))
             self.assertIn(PRIVATE, channels)
 
     def test_missing_bot_id_is_an_error(self):
@@ -714,17 +786,33 @@ class WakerTests(unittest.TestCase):
         h.w.handle(msg(author=STRANGER, mid="900000000000000002", mentions=[BOT]), GENERAL)
         self.assertEqual(h.sent, [])
 
+    def _ticket_harness(self, d, ticket):
+        p = os.path.join(d, "t.json")
+        with open(p, "w") as fh:
+            json.dump({"tickets": [ticket]}, fh)
+        logs = []
+        return WakerHarness({"gizmo": gagent(tickets_file=p)},
+                            tickets={"gizmo": gw.TicketReader(p, logs.append)})
+
     def test_reply_to_own_ask_is_ignored_via_tickets(self):
         with tempfile.TemporaryDirectory() as d:
-            p = os.path.join(d, "t.json")
-            with open(p, "w") as fh:
-                json.dump({"tickets": [{"ask_message_id": "800000000000000001"}]}, fh)
-            logs = []
-            h = WakerHarness({"gizmo": gagent(tickets_file=p)},
-                             tickets={"gizmo": gw.TicketReader(p, logs.append)})
+            h = self._ticket_harness(d, {
+                "ask_message_id": "800000000000000001", "status": "answered",
+                "reply_message_ids": ["900000000000000001"],
+                "expected_author_ids": [TEAMBOT]})
             h.w.handle(msg(author=TEAMBOT, mid="900000000000000001", bot=True,
                            reply_to="800000000000000001"), PRIVATE)
             self.assertEqual(h.sent, [])
+
+    def test_unconsumed_reply_to_own_ask_wakes(self):
+        with tempfile.TemporaryDirectory() as d:
+            h = self._ticket_harness(d, {
+                "ask_message_id": "800000000000000001", "status": "answered",
+                "reply_message_ids": ["900000000000000001"],
+                "expected_author_ids": [TEAMBOT]})
+            h.w.handle(msg(author=TEAMBOT, mid="900000000000000002", bot=True,
+                           reply_to="800000000000000001"), PRIVATE)
+            self.assertEqual(h.ids(), ["900000000000000002"])
 
     def test_startup_check_warns(self):
         with tempfile.TemporaryDirectory() as d:

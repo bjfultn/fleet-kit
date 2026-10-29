@@ -15,7 +15,10 @@ Anything else, or any failure, is {"ok": false, "error": "plain sentence"}.
 The broker only posts to the channels in its config, pings only fleet agents
 it can resolve by name (never @everyone, never a human), and caps outgoing
 volume. The mention watcher (bin/grokbot_wake.py) reads tickets.json so that a
-reply to one of the agent's asks is captured here instead of waking the agent.
+reply the broker captured for one of the agent's asks does not also wake the
+agent. Each ticket records the exact message ids the broker consumed
+(reply_message_ids) and whose replies it would consume (expected_author_ids);
+the watcher suppresses only those, so a later message is never lost.
 
 Discord is protected both ways: outgoing messages are capped per minute, and
 every GET (read, check, ask polling) draws on one shared per-minute budget.
@@ -227,8 +230,8 @@ def _id_key(msg):
         return 0
 
 
-def find_reply(messages, ask_msg_id, expected_authors):
-    """Locate the reply to one ask: (chunks, last_message, other_follows).
+def reply_messages(messages, ask_msg_id, expected_authors):
+    """Locate the reply to one ask: (messages, other_follows).
 
     The reply is the first message (oldest first) whose message_reference
     points at the ask and whose author is expected. Continuation chunks are the
@@ -236,7 +239,7 @@ def find_reply(messages, ask_msg_id, expected_authors):
     a chunk that is itself threaded to some other message ends the run.
     other_follows is True when a message from a different author comes right
     after the last chunk, which means the reply is finished. No reply is
-    ([], None, False).
+    ([], False).
     """
     ordered = sorted(messages, key=_id_key)
     ask = str(ask_msg_id)
@@ -255,10 +258,9 @@ def find_reply(messages, ask_msg_id, expected_authors):
             start = i
             break
     if start is None:
-        return [], None, False
+        return [], False
     who = author(ordered[start])
-    last = ordered[start]
-    chunks = [last.get("content") or ""]
+    run = [ordered[start]]
     other_follows = False
     for m in ordered[start + 1:]:
         if author(m) != who:
@@ -266,9 +268,17 @@ def find_reply(messages, ask_msg_id, expected_authors):
             break
         if ref(m) not in (None, ask):
             break
-        chunks.append(m.get("content") or "")
-        last = m
-    return chunks, last, other_follows
+        run.append(m)
+    return run, other_follows
+
+
+def find_reply(messages, ask_msg_id, expected_authors):
+    """The text view of reply_messages: (chunks, last_message, other_follows).
+    No reply is ([], None, False)."""
+    run, other_follows = reply_messages(messages, ask_msg_id, expected_authors)
+    if not run:
+        return [], None, False
+    return [m.get("content") or "" for m in run], run[-1], other_follows
 
 
 def collect_reply(messages, ask_msg_id, expected_authors):
@@ -339,6 +349,9 @@ class Broker:
             with open(self._tickets_path) as fh:
                 data = json.load(fh)
             self._tickets = [t for t in data.get("tickets", []) if isinstance(t, dict)]
+            for t in self._tickets:   # tickets written before these fields existed
+                t.setdefault("reply_message_ids", [])
+                t.setdefault("expected_author_ids", [])
         except (OSError, ValueError, AttributeError):
             self._tickets = []
         self._prune()
@@ -574,7 +587,14 @@ class Broker:
         with self._lock:
             ticket = {"ticket": self._new_ticket_id(), "agent": agent,
                       "channel_id": str(channel_id), "ask_message_id": ask_id,
-                      "asked_at": self.clock(), "status": "working", "reply": None}
+                      "asked_at": self.clock(), "status": "working", "reply": None,
+                      # What the watcher needs to know which messages are ours:
+                      # the ids of the reply messages once they are captured, and
+                      # the bot ids whose reply _poll would capture (the same set
+                      # reply_messages is given), so it can hold back the answer
+                      # to a working ticket before the broker has looked.
+                      "reply_message_ids": [],
+                      "expected_author_ids": sorted(self._expected(agent))}
             self._tickets.append(ticket)
             self._persist()
         working = {"ticket": ticket["ticket"], "status": "working", "reply": None}
@@ -615,14 +635,15 @@ class Broker:
         """One look for one ticket. Returns the reply once it is complete, else
         None; a reply still arriving (or split and not yet finished) is None."""
         msgs = self._fetch_after(ticket["channel_id"], ticket["ask_message_id"])
-        chunks, last, other_follows = find_reply(
+        run, other_follows = reply_messages(
             msgs, ticket["ask_message_id"], self._expected(ticket["agent"]))
-        if not chunks or not reply_settled(last, other_follows, self.clock()):
+        if not run or not reply_settled(run[-1], other_follows, self.clock()):
             return None
-        joined = "\n".join(chunks)
+        joined = "\n".join(m.get("content") or "" for m in run)
         with self._lock:
             ticket["status"] = "answered"
             ticket["reply"] = joined
+            ticket["reply_message_ids"] = [str(m.get("id", "")) for m in run]
             self._persist()
         return joined
 

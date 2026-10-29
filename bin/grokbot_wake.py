@@ -83,7 +83,31 @@ def build_payload(msg: dict, channel_id: str) -> dict:
 
 # ── Who may wake the agent ──────────────────────────────────────────────────
 
-def grokbot_targets(msg: dict, channel_id: str, agent: dict, ask_ids: set) -> bool:
+class Ask:
+    """What the broker's ticket file says about one ask: the reply message ids
+    it consumed, whether the ticket is still working, and whose replies it
+    would consume. Missing fields (an older broker) mean nothing is claimed."""
+
+    __slots__ = ("reply_ids", "working", "authors")
+
+    def __init__(self, reply_ids=(), working=False, authors=()):
+        self.reply_ids = frozenset(str(i) for i in reply_ids)
+        self.working = bool(working)
+        self.authors = frozenset(str(a) for a in authors)
+
+    def captured(self, message_id: str, author_id: str) -> bool:
+        """Did, or will, the broker consume this reply?
+
+        Only if it recorded the id, or the ticket is still working and the
+        author is one whose reply it would take. Anything else (a second
+        message after the answer, a human, another agent) is news for the agent.
+        """
+        if message_id in self.reply_ids:
+            return True
+        return self.working and author_id in self.authors
+
+
+def grokbot_targets(msg: dict, channel_id: str, agent: dict, asks: dict) -> bool:
     """Should this message wake this Grok Bot agent?
 
     Every condition must hold:
@@ -92,9 +116,10 @@ def grokbot_targets(msg: dict, channel_id: str, agent: dict, ask_ids: set) -> bo
       - the author is in that file's allowFrom (humans) or allowBots (bots);
       - the message tags the agent by user mention (not @everyone/@here, not a
         role), or was posted in the agent's private channel;
-      - it is not a reply to one of the agent's own asks. Those replies are
-        answers to a request the agent made, collected through the broker's
-        ticket file; waking on them would start a ping loop.
+      - it is not a reply the broker has taken for one of the agent's asks
+        (asks: ask message id -> Ask). Those are delivered through the broker's
+        ticket file, and waking on them would start a ping loop. A reply to an
+        ask that the broker did not consume still wakes the agent.
 
     Only the top-level allowFrom is honoured, not a per-group allowFrom: the
     agent record is deliberately flat, and the stricter reading fails closed.
@@ -114,8 +139,14 @@ def grokbot_targets(msg: dict, channel_id: str, agent: dict, ask_ids: set) -> bo
     if not (tagged or in_private):
         return False
 
+    mid = str(msg.get("id", ""))
     ref = (msg.get("message_reference") or {}).get("message_id")
-    if ref is not None and str(ref) in ask_ids:
+    ask = None if ref is None else asks.get(str(ref))
+    if ask is not None and ask.captured(mid, author_id):
+        return False
+    # A continuation chunk of a reply the broker took carries no reference to
+    # the ask, but the broker recorded its id, so it is still ours.
+    if any(mid in a.reply_ids for a in asks.values()):
         return False
     return True
 
@@ -123,13 +154,14 @@ def grokbot_targets(msg: dict, channel_id: str, agent: dict, ask_ids: set) -> bo
 # ── The broker's ticket file (read-only) ────────────────────────────────────
 
 class TicketReader:
-    """Set of ask message ids from the broker's tickets file.
+    """The broker's tickets file, as {ask message id: Ask}.
 
-    Missing or unreadable is an empty set (fail open: a duplicate wake is
+    Missing or unreadable is an empty mapping (fail open: a duplicate wake is
     bounded by WakeGate). The failure is logged at most once per
     TICKET_WARN_INTERVAL, so a broker that is down shows up in the log without
     filling it every poll. An unset path is silent here; startup_check warns
-    about it once.
+    about it once. A ticket without reply_message_ids or expected_author_ids
+    (written by an older broker) claims nothing.
     """
 
     def __init__(self, path: str, log, clock=time.monotonic):
@@ -137,30 +169,41 @@ class TicketReader:
         self.log = log
         self.clock = clock
         self._last_warn = None
-        self._mtime = None
-        self._ids: set = set()
+        self._stamp = None
+        self._asks: dict = {}
 
-    def ask_ids(self) -> set:
+    def asks(self) -> dict:
         if not self.path:
-            return set()
+            return {}
         try:
-            mtime = os.path.getmtime(self.path)
-            if mtime != self._mtime:
+            st = os.stat(self.path)
+            stamp = (st.st_mtime_ns, st.st_ino, st.st_size)
+            if stamp != self._stamp:
                 with open(self.path) as fh:
                     data = json.load(fh)
-                self._ids = {str(t["ask_message_id"]) for t in data.get("tickets", [])
-                             if t.get("ask_message_id")}
-                self._mtime = mtime
-            return set(self._ids)
+                asks = {}
+                for t in data.get("tickets", []):
+                    if not t.get("ask_message_id"):
+                        continue
+                    asks[str(t["ask_message_id"])] = Ask(
+                        t.get("reply_message_ids") or (),
+                        t.get("status") == "working",
+                        t.get("expected_author_ids") or ())
+                self._asks = asks
+                self._stamp = stamp
+            return dict(self._asks)
         except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
-            self._mtime = None
-            self._ids = set()
+            self._stamp = None
+            self._asks = {}
             now = self.clock()
             if self._last_warn is None or now - self._last_warn >= TICKET_WARN_INTERVAL:
                 self._last_warn = now
                 self.log(f"  WARNING tickets file {self.path} unreadable "
                          f"({type(exc).__name__}), treating as no asks")
-            return set()
+            return {}
+
+    def ask_ids(self) -> set:
+        return set(self.asks())
 
 
 # ── Throttling ──────────────────────────────────────────────────────────────
@@ -582,7 +625,7 @@ class GrokWaker:
 
     def _handle_one(self, alias, agent, msg, channel_id, is_bot):
         refresh_access(agent, self.log)
-        if not grokbot_targets(msg, channel_id, agent, self.tickets[alias].ask_ids()):
+        if not grokbot_targets(msg, channel_id, agent, self.tickets[alias].asks()):
             return
         payload = build_payload(msg, channel_id)
         self.log(f"Grok mention from {payload['author']} for {alias}: "
