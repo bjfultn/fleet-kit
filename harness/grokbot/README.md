@@ -185,6 +185,13 @@ harness/grokbot/install/verify-confinement.sh "$AGENT" --app
 
 ## Notes
 
+- The app unit caps memory, tasks and CPU (`MemoryMax=4G`, `TasksMax=512`,
+  `CPUQuota=200%`) and drops all capabilities, device nodes and kernel
+  interfaces. Electron may need some of that loosened: check the journal on
+  first start and tune the unit at install time.
+- Disk: the agent's home directory is the one place it can write, and nothing
+  here limits its size. Put a quota on it (a quota on the filesystem, or home on
+  its own small filesystem). That is a host step this kit does not do.
 - The egress unit has no `ExecStop`. Stopping it does not open the firewall,
   and the app unit is bound to it, so the app stops with it.
 - To change the firewall, edit the file, run `nft -c -f` on it, then

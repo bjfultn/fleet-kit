@@ -39,6 +39,21 @@ RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 SocketBindDeny=any
 IPAddressDeny=localhost link-local multicast 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 100.64.0.0/10
 IPAddressAllow=127.0.0.53
+# Resource limits and extra hardening. Electron is the likeliest thing to trip
+# these: if the app or its sandbox fails to start, read the journal and loosen
+# one line at a time (PrivateDevices and CapabilityBoundingSet first, then
+# MemoryMax and TasksMax if it is killed under load). Tune them at install time.
+MemoryMax=4G
+TasksMax=512
+CPUQuota=200%
+PrivateDevices=yes
+RemoveIPC=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectClock=yes
+LockPersonality=yes
+RestrictSUIDSGID=yes
+CapabilityBoundingSet=
 Restart=on-failure
 
 [Install]
