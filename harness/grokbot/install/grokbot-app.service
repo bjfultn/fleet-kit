@@ -18,7 +18,9 @@ ExecStart=/usr/bin/xvfb-run -a -s "-screen 0 1280x800x24" grok-bot --password-st
 NoNewPrivileges=yes
 ProtectSystem=strict
 # The leading "-" keeps a path that does not exist on this box from failing the unit.
-InaccessiblePaths=-/opt/web -/home/ops -/srv -/var/lib/docker -/etc/__AGENT__-broker -/var/lib/__AGENT__-broker -/run/docker.sock
+InaccessiblePaths=-/var/lib/docker -/etc/__AGENT__-broker -/var/lib/__AGENT__-broker -/run/docker.sock
+# render.sh turns its PRIVATE_PATH arguments into InaccessiblePaths=- lines here.
+__PRIVATE_PATHS__
 PrivateTmp=yes
 ProtectProc=invisible
 ProcSubset=pid

@@ -9,9 +9,13 @@
 # --app also checks from inside the running app unit's mount namespace.
 #
 # Environment:
-#   VERIFY_OPERATOR_HOME  operator's home           (default /home/ops)
-#   VERIFY_PRIVATE_DIRS   dirs the agent must not read anything in
-#                         (default "/opt/web /home/ops")
+#   VERIFY_OPERATOR_HOME  operator's home (default: the home of $SUDO_USER, if
+#                         the script was started with sudo)
+#   VERIFY_PRIVATE_DIRS   space-separated dirs the agent must not read anything
+#                         in; use the same list you gave render.sh. Default none.
+#
+# The operator is the user who ran sudo ($SUDO_USER). Checks that need an
+# operator or a socket the box does not have yet are skipped, not failed.
 #
 # Network probes use a small connect() classifier run as the agent. The
 # firewall's drop makes connect() fail at once with EPERM (or time out), which
@@ -41,8 +45,13 @@ if ! AGENT_UID=$(id -u "$AGENT" 2>/dev/null) || ! AGENT_GID=$(id -g "$AGENT" 2>/
     exit 2
 fi
 
-OPERATOR_HOME=${VERIFY_OPERATOR_HOME:-/home/ops}
-PRIVATE_DIRS=${VERIFY_PRIVATE_DIRS:-/opt/web /home/ops}
+OPERATOR=${SUDO_USER:-}
+[ "$OPERATOR" = root ] && OPERATOR=
+OPERATOR_HOME=${VERIFY_OPERATOR_HOME:-}
+if [ -z "$OPERATOR_HOME" ] && [ -n "$OPERATOR" ]; then
+    OPERATOR_HOME=$(getent passwd "$OPERATOR" | cut -d: -f6)
+fi
+PRIVATE_DIRS=${VERIFY_PRIVATE_DIRS:-}
 BROKER_ETC=/etc/$AGENT-broker
 BROKER_STATE=/var/lib/$AGENT-broker
 FAILS=0
@@ -152,6 +161,9 @@ else
     fail "find canary not seen" "secret search skipped"
 fi
 
+if [ -z "$PRIVATE_DIRS" ]; then
+    skip "cannot read private directories" "VERIFY_PRIVATE_DIRS is empty"
+fi
 for d in $PRIVATE_DIRS; do
     name="cannot read anything under $d"
     if [ ! -d "$d" ]; then
@@ -166,7 +178,9 @@ for d in $PRIVATE_DIRS; do
 done
 
 op_env=$OPERATOR_HOME/.claude/channels/discord/.env
-if [ -e "$op_env" ]; then
+if [ -z "$OPERATOR_HOME" ]; then
+    skip "cannot read operator discord .env" "no operator home (set VERIFY_OPERATOR_HOME)"
+elif [ -e "$op_env" ]; then
     as_agent timeout 30 cat "$op_env" >/dev/null 2>&1
     expect_rc "cannot read operator discord .env" "$?" refused
 else
@@ -188,6 +202,19 @@ for d in "$BROKER_ETC" "$BROKER_STATE"; do
         skip "cannot list $d" "not provisioned"
     fi
 done
+
+# The watcher runs as the operator and reads tickets.json through an ACL. The
+# broker writes it on the first ask, so before then there is nothing to read.
+TICKETS=$BROKER_STATE/tickets.json
+if [ ! -e "$TICKETS" ]; then
+    skip "operator can read tickets.json" "the broker has not written it yet"
+elif [ -z "$OPERATOR" ]; then
+    skip "operator can read tickets.json" "not started with sudo, no operator to run as"
+else
+    setpriv --reuid="$OPERATOR" --regid="$OPERATOR" --init-groups --reset-env \
+        timeout 30 cat "$TICKETS" >/dev/null 2>&1
+    expect_rc "operator ($OPERATOR) can read tickets.json" "$?" ok
+fi
 
 # --- privilege and scheduling ----------------------------------------------
 
@@ -347,6 +374,25 @@ elif have python3; then
     fi
 else
     skip "cannot connect docker.sock" "python3 not installed"
+fi
+
+# A uid that is not the agent must not be able to talk to the broker. The probe
+# is a connect() classifier (EACCES is "blocked"); the agent's own connect is
+# the control, since a socket nobody can reach would pass the check vacuously.
+if [ ! -S "$TEAM_SOCK" ]; then
+    skip "nobody cannot connect to the broker socket" "no socket at $TEAM_SOCK"
+elif ! have python3 || ! NOBODY_UID=$(id -u nobody 2>/dev/null) || ! NOBODY_GID=$(id -g nobody 2>/dev/null); then
+    skip "nobody cannot connect to the broker socket" "python3 or user nobody missing"
+elif [ "$(probe_agent unix "$TEAM_SOCK")" != open ]; then
+    skip "nobody cannot connect to the broker socket" "control: $AGENT cannot connect to it"
+else
+    got=$(setpriv --reuid="$NOBODY_UID" --regid="$NOBODY_GID" --clear-groups --reset-env \
+        timeout 6 python3 -I -c "$PROBE" unix "$TEAM_SOCK" 2>/dev/null)
+    if [ "$got" = blocked ]; then
+        pass "nobody cannot connect to the broker socket"
+    else
+        fail "nobody cannot connect to the broker socket" "probe says ${got:-nothing (timed out?)}, want blocked"
+    fi
 fi
 
 # --- network ---------------------------------------------------------------

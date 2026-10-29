@@ -67,11 +67,15 @@ The broker's user name is `AGENT-broker`, and Linux user names stop at 32
 characters, so AGENT is limited to 24 characters (render.sh and the verify
 script enforce it).
 
-1. Render the templates.
+1. Render the templates. Give it every directory the agent must not see on this
+box (the operator's home, the sites root, anything else private) as trailing
+arguments; each becomes an `InaccessiblePaths=-` line in the app unit. The
+examples here use `/home/operator` and `/srv/sites`; use your own.
 
 ```
+PRIVATE="/home/operator /srv/sites"
 OUT=$(mktemp -d)
-harness/grokbot/install/render.sh "$AGENT" "$OUT"
+harness/grokbot/install/render.sh "$AGENT" "$OUT" $PRIVATE
 ```
 
 2. Create the users. The agent gets a bash shell (the app runs commands through
@@ -165,14 +169,14 @@ systemctl daemon-reload
 systemctl enable --now "$AGENT-egress.service" "$AGENT-broker.service"
 ```
 
-10. Verify. Every line must be PASS (SKIP means the box lacks the tool or path
-for that check). The script reads `VERIFY_OPERATOR_HOME` (default `/home/ops`)
-and `VERIFY_PRIVATE_DIRS` (default `/opt/web /home/ops`); set them to match the
-box.
+10. Verify. Run it with sudo from the operator's account, not from a root
+shell, so the script knows which user is the operator. Every line must be PASS (SKIP means the box lacks the tool or path for
+that check, or the broker has not written tickets yet). The script reads
+`VERIFY_PRIVATE_DIRS`, the same list you gave render.sh (default none), and
+`VERIFY_OPERATOR_HOME` (default: the home of the user who ran sudo).
 
 ```
-VERIFY_OPERATOR_HOME="/home/$OPERATOR" VERIFY_PRIVATE_DIRS="/home/$OPERATOR" \
-  harness/grokbot/install/verify-confinement.sh "$AGENT"
+sudo VERIFY_PRIVATE_DIRS="$PRIVATE" harness/grokbot/install/verify-confinement.sh "$AGENT"
 ```
 
 11. When the app is installed, start it and verify again from inside its
@@ -180,7 +184,7 @@ namespace.
 
 ```
 systemctl enable --now "$AGENT-app.service"
-harness/grokbot/install/verify-confinement.sh "$AGENT" --app
+sudo VERIFY_PRIVATE_DIRS="$PRIVATE" harness/grokbot/install/verify-confinement.sh "$AGENT" --app
 ```
 
 ## Notes
@@ -198,12 +202,16 @@ harness/grokbot/install/verify-confinement.sh "$AGENT" --app
   `systemctl restart "$AGENT-egress.service"`. The file replaces the table in
   one transaction. The unit's own `ExecStartPre` runs the same check first.
 - The app unit hides paths that do not exist on every box with a leading `-`.
-  Edit its `InaccessiblePaths` for the directories the agent must not see on
-  yours.
+  Its private directories come from render.sh's trailing arguments; to change
+  them, re-render, or edit the `InaccessiblePaths` lines in the installed unit.
 - The verify script probes loopback and the LAN gateway with a connect()
   classifier run as the agent. A drop shows as an immediate EPERM or a timeout
   ("blocked"). "refused" means the packet got through, so it fails. A control
   probe run as root must reach 127.0.0.1:22 first, or that check is skipped.
+- Besides confinement, the verify script checks that the operator can read
+  `tickets.json` (skipped until the broker has written it), that the user
+  `nobody` cannot connect to the broker socket, and that the agent cannot accept
+  a connection on a loopback port.
 - The agent is IPv4 only: the policy drops all its IPv6 traffic, and also
   drops anything addressed to one of the box's own addresses.
 - DNS assumes the systemd-resolved stub at `127.0.0.53`. On a box without it,
