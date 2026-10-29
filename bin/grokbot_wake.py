@@ -23,6 +23,7 @@ has nothing to tune.
 import json
 import os
 import subprocess
+import time
 import urllib.error
 import urllib.request
 from collections import deque
@@ -34,12 +35,13 @@ PLATFORM = "grok-bot"
 TEXT_LIMIT = 1500          # characters of message text sent to the webhook
 WEBHOOK_TIMEOUT = 10       # seconds
 IN_FLIGHT_SECONDS = 120    # one wake per agent per this long; the rest coalesce
-HOP_CAP = 4                # bot-authored wakes per thread per hour
+HOP_CAP = 4                # bot-authored wakes per channel per hour
 HOP_WINDOW = 3600
 MAX_HELD = 20              # held payloads per agent; oldest dropped beyond this
 QUIET_START_HOUR = 22      # bot-authored wakes held 22:00 to 07:00 local
 QUIET_END_HOUR = 7
-QUIET_TZ = "America/Denver"
+DEFAULT_QUIET_TZ = "America/Denver"
+TICKET_WARN_INTERVAL = 600  # at most one unreadable-tickets log line per this long
 
 
 class FleetConfigError(Exception):
@@ -63,12 +65,6 @@ def sanitize(content: str) -> str:
         else:
             out.append(ch)
     return "".join(out)
-
-
-def thread_id(msg: dict) -> str:
-    """The message this one replies to, else the message itself."""
-    ref = msg.get("message_reference") or {}
-    return str(ref.get("message_id") or msg.get("id") or "")
 
 
 def build_payload(msg: dict, channel_id: str) -> dict:
@@ -129,21 +125,23 @@ def grokbot_targets(msg: dict, channel_id: str, agent: dict, ask_ids: set) -> bo
 class TicketReader:
     """Set of ask message ids from the broker's tickets file.
 
-    Missing or unreadable is an empty set, logged once per failure streak so a
-    broker that is down does not fill the log every poll. The hop cap in
-    WakeGate is what stops a loop while the file is unavailable.
+    Missing or unreadable is an empty set (fail open: a duplicate wake is
+    bounded by WakeGate). The failure is logged at most once per
+    TICKET_WARN_INTERVAL, so a broker that is down shows up in the log without
+    filling it every poll. An unset path is silent here; startup_check warns
+    about it once.
     """
 
-    def __init__(self, path: str, log):
+    def __init__(self, path: str, log, clock=time.monotonic):
         self.path = path
         self.log = log
-        self._warned = False
+        self.clock = clock
+        self._last_warn = None
         self._mtime = None
         self._ids: set = set()
 
     def ask_ids(self) -> set:
         if not self.path:
-            self._fail("no grokbot.tickets_file configured")
             return set()
         try:
             mtime = os.path.getmtime(self.path)
@@ -153,19 +151,16 @@ class TicketReader:
                 self._ids = {str(t["ask_message_id"]) for t in data.get("tickets", [])
                              if t.get("ask_message_id")}
                 self._mtime = mtime
-            self._warned = False
             return set(self._ids)
         except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
             self._mtime = None
             self._ids = set()
-            self._fail(f"tickets file {self.path} unreadable ({type(exc).__name__}), "
-                       "treating as no asks")
+            now = self.clock()
+            if self._last_warn is None or now - self._last_warn >= TICKET_WARN_INTERVAL:
+                self._last_warn = now
+                self.log(f"  WARNING tickets file {self.path} unreadable "
+                         f"({type(exc).__name__}), treating as no asks")
             return set()
-
-    def _fail(self, why: str):
-        if not self._warned:
-            self._warned = True
-            self.log(f"  {why}")
 
 
 # ── Throttling ──────────────────────────────────────────────────────────────
@@ -175,9 +170,9 @@ def in_quiet_hours(now_local: datetime) -> bool:
     return h >= QUIET_START_HOUR or h < QUIET_END_HOUR
 
 
-def now_quiet_tz() -> datetime:
-    """Current time where quiet hours are measured. Raises if tzdata is absent."""
-    return datetime.now(ZoneInfo(QUIET_TZ))
+def local_now(tz_name: str) -> datetime:
+    """Current time in tz_name. Raises if the timezone database lacks it."""
+    return datetime.now(ZoneInfo(tz_name))
 
 
 class WakeGate:
@@ -187,11 +182,19 @@ class WakeGate:
     fake in tests). quiet_hours is the set of aliases whose bot-authored wakes
     are held overnight; messages from humans are never held for that reason.
 
-    Protocol for the caller, per message that already passed grokbot_targets:
+    The hop cap bounds bot-to-bot ping-pong: at most HOP_CAP wakes an hour
+    that carry a bot-authored message from one channel, per agent. It is keyed
+    on the channel, not on a reply chain, because each hop of a chain replies
+    to the previous message and so lands in a new bucket. It is counted when
+    a batch is released (one wake counts once, however many messages it
+    coalesced), so messages held overnight do not spend the hour's budget.
 
-        verdict = gate.admit(alias, thread_id, is_bot, now_local)
+    Protocol for the caller, per message that already passed grokbot_targets
+    (GrokWaker below is the one real caller):
+
+        verdict = gate.admit(alias, channel_id, is_bot, now_local)
         if verdict == "drop": skip it
-        gate.hold(alias, payload, is_bot)
+        gate.hold(alias, payload, is_bot)      # payload carries channel_id
         if verdict == "send":
             batch = gate.drain(alias, now_local, force=True)
             if not send(batch): gate.failed(alias)
@@ -205,8 +208,8 @@ class WakeGate:
         self.log = log or (lambda s: None)
         self._last_send: dict = {}
         self._held: dict = {}       # alias -> list[(payload, is_bot)]
-        self._batch: dict = {}      # alias -> entries of the last drain
-        self._hops: dict = {}       # (alias, thread) -> deque[timestamp]
+        self._batch: dict = {}      # alias -> (entries, [(hop key, timestamp)])
+        self._hops: dict = {}       # (alias, channel) -> deque[timestamp]
 
     def _in_flight(self, alias) -> bool:
         last = self._last_send.get(alias)
@@ -215,30 +218,26 @@ class WakeGate:
     def _quiet(self, alias, now_local) -> bool:
         return alias in self.quiet and now_local is not None and in_quiet_hours(now_local)
 
-    def admit(self, alias, thread, is_bot_author, now_local) -> str:
+    def _recent_hops(self, key, now) -> deque:
+        hops = self._hops.setdefault(key, deque())
+        while hops and now - hops[0] >= HOP_WINDOW:
+            hops.popleft()
+        return hops
+
+    def admit(self, alias, channel_id, is_bot_author, now_local) -> str:
         now = self.clock()
         if is_bot_author:
-            key = (alias, thread)
-            hops = self._hops.setdefault(key, deque())
-            while hops and now - hops[0] >= HOP_WINDOW:
-                hops.popleft()
-            if len(hops) >= HOP_CAP:
-                self.log(f"  {alias}: DROP bot wake, thread {thread} hit the hop cap "
-                         f"({HOP_CAP}/hour)")
+            n = len(self._recent_hops((alias, channel_id), now))
+            if n >= HOP_CAP:
+                self.log(f"  {alias}: DROP bot wake in channel {channel_id}: "
+                         f"{n} bot wakes in the last hour (cap {HOP_CAP})")
                 return "drop"
-            hops.append(now)
-            if len(self._hops) > 500:
-                self._sweep(now)
             if self._quiet(alias, now_local):
                 return "hold"
         if self._in_flight(alias):
             return "hold"
         self._last_send[alias] = now
         return "send"
-
-    def _sweep(self, now):
-        for k in [k for k, h in self._hops.items() if not h or now - h[-1] >= HOP_WINDOW]:
-            del self._hops[k]
 
     def hold(self, alias, payload, is_bot=False):
         q = self._held.setdefault(alias, [])
@@ -267,14 +266,33 @@ class WakeGate:
             take, keep = list(q), []
         if not take:
             return []
+        now = self.clock()
         self._held[alias] = keep
-        self._batch[alias] = take
-        self._last_send[alias] = self.clock()
+        self._last_send[alias] = now
+        hops = []
+        for ch in sorted({str(p.get("channel_id", "")) for p, bot in take if bot}):
+            key = (alias, ch)
+            self._recent_hops(key, now).append(now)
+            hops.append((key, now))
+        if len(self._hops) > 500:
+            self._sweep(now)
+        self._batch[alias] = (take, hops)
         return [p for p, _ in take]
 
+    def _sweep(self, now):
+        for k in [k for k, h in self._hops.items() if not h or now - h[-1] >= HOP_WINDOW]:
+            del self._hops[k]
+
     def failed(self, alias):
-        """The last drained batch did not go out: put it back, keep the backoff."""
-        entries = self._batch.pop(alias, [])
+        """The last drained batch did not go out: put it back, keep the backoff.
+
+        Its hop counts are returned too, since nothing was woken.
+        """
+        entries, hops = self._batch.pop(alias, ([], []))
+        for key, ts in hops:
+            dq = self._hops.get(key)
+            if dq and ts in dq:
+                dq.remove(ts)
         if entries:
             q = self._held.setdefault(alias, [])
             q[:0] = entries
@@ -341,7 +359,9 @@ def wake_grokbot(alias, pass_key, body, log, opener=urllib.request.urlopen,
         exc.close()
         log(f"Failed to wake {alias} (webhook): HTTP {exc.code}")
         return False
-    except (urllib.error.URLError, OSError, ValueError) as exc:
+    except Exception as exc:
+        # Anything else (http.client.HTTPException, ssl errors, ...) is also a
+        # failed wake, not a reason to lose the batch or stop the poll loop.
         reason = getattr(exc, "reason", None)
         detail = type(reason).__name__ if reason is not None else type(exc).__name__
         log(f"Failed to wake {alias} (webhook): {type(exc).__name__}/{detail}")
@@ -463,7 +483,16 @@ def load_fleet_agents(agents_dir: str, general_channel_id: str = ""):
                 "webhook_pass_key": str(gb.get("webhook_pass_key") or "").strip(),
                 "tickets_file": str(gb.get("tickets_file") or "").strip(),
                 "quiet_hours": bool(gb.get("quiet_hours")),
+                "quiet_tz": str(gb.get("quiet_tz") or DEFAULT_QUIET_TZ).strip(),
             }
+            if agent["quiet_hours"]:
+                try:
+                    ZoneInfo(agent["quiet_tz"])
+                except Exception as exc:  # ZoneInfoNotFoundError, ValueError
+                    raise FleetConfigError(
+                        f"agent {name}: grokbot.quiet_tz {agent['quiet_tz']!r} is not "
+                        f"a usable timezone ({type(exc).__name__}); install tzdata or "
+                        "fix the name")
             refresh_access(agent, lambda s: None)
             groks[window] = agent
             watch(private)
@@ -493,3 +522,104 @@ def load_fleet_agents(agents_dir: str, general_channel_id: str = ""):
         raise FleetConfigError(f"no agents found under {agents_dir}")
 
     return agents, groks, channels
+
+
+# ── The glue the watcher calls ──────────────────────────────────────────────
+
+class GrokWaker:
+    """Everything between "a message arrived" and "a webhook went out".
+
+    The watcher has import-time side effects, so this lives here where it can be
+    tested. The watcher builds one and calls handle() per message and drain()
+    per poll. Injected so tests need no network, clock or tz database:
+
+      send(alias, pass_key, body) -> bool   the webhook call
+      log(str)
+      now(tz_name) -> aware datetime        used only for quiet-hours agents
+
+    A failure for one agent (a send that raises, an unreadable file) is
+    contained to that agent and never loses a batch: whatever was drained and
+    not delivered goes back in the gate and is retried after its backoff.
+    """
+
+    def __init__(self, agents, gate, tickets, send, log, now=local_now):
+        self.agents = agents
+        self.gate = gate
+        self.tickets = tickets
+        self.send = send
+        self.log = log
+        self.now = now
+
+    def _now_local(self, agent):
+        if agent["alias"] in self.gate.quiet:
+            return self.now(agent["quiet_tz"])
+        return None
+
+    def startup_check(self) -> None:
+        """Say plainly about config that will silently do nothing or too much."""
+        for alias, a in self.agents.items():
+            private = a.get("private_channel_id")
+            if private and private not in a["allowed_channels"]:
+                self.log(f"  WARNING {alias}: private channel {private} is not in the "
+                         "groups of its access.json, so nothing there can wake it")
+            if not a.get("webhook_pass_key"):
+                self.log(f"  WARNING {alias}: no grokbot.webhook_pass_key, it cannot be woken")
+            if not a.get("tickets_file"):
+                self.log(f"  WARNING {alias}: no grokbot.tickets_file, replies to its own "
+                         "asks will wake it (the hop cap is the only bound)")
+            else:
+                self.tickets[alias].ask_ids()  # logs a warning if unreadable
+
+    def handle(self, msg: dict, channel_id: str) -> None:
+        """Wake every grok-bot agent this message is addressed to, if it may."""
+        is_bot = bool((msg.get("author") or {}).get("bot"))
+        for alias, agent in self.agents.items():
+            try:
+                self._handle_one(alias, agent, msg, channel_id, is_bot)
+            except Exception as exc:
+                self.log(f"  {alias}: error handling message "
+                         f"{msg.get('id', '?')} ({type(exc).__name__})")
+
+    def _handle_one(self, alias, agent, msg, channel_id, is_bot):
+        refresh_access(agent, self.log)
+        if not grokbot_targets(msg, channel_id, agent, self.tickets[alias].ask_ids()):
+            return
+        payload = build_payload(msg, channel_id)
+        self.log(f"Grok mention from {payload['author']} for {alias}: "
+                 f"\"{payload['text'][:80]}\"")
+        now_local = self._now_local(agent)
+        verdict = self.gate.admit(alias, str(channel_id), is_bot, now_local)
+        if verdict == "drop":
+            return
+        self.gate.hold(alias, payload, is_bot)
+        if verdict == "hold":
+            self.log(f"  {alias}: held (wake in flight or quiet hours)")
+            return
+        batch = self.gate.drain(alias, now_local, force=True)
+        if batch:
+            self._send_batch(alias, batch)
+
+    def drain(self) -> None:
+        """Release anything held once the in-flight window or quiet hours end."""
+        for alias, agent in self.agents.items():
+            try:
+                batch = self.gate.drain(alias, self._now_local(agent))
+                if batch:
+                    self.log(f"  {alias}: releasing {len(batch)} held message(s)")
+                    self._send_batch(alias, batch)
+            except Exception as exc:
+                self.log(f"  {alias}: error releasing held messages ({type(exc).__name__})")
+
+    def _send_batch(self, alias, batch) -> None:
+        """One webhook for the batch; on any failure it goes back in the gate."""
+        key = self.agents[alias].get("webhook_pass_key")
+        ok = False
+        if not key:
+            self.log(f"  {alias}: no grokbot.webhook_pass_key configured, cannot wake")
+        else:
+            try:
+                ok = bool(self.send(alias, key, {"messages": batch}))
+            except Exception as exc:
+                self.log(f"  {alias}: webhook send raised {type(exc).__name__}")
+        if not ok:
+            self.gate.failed(alias)

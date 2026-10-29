@@ -3,6 +3,7 @@
 No Discord, no network, no real pass store. Ids below are placeholders.
 """
 
+import http.client
 import io
 import json
 import os
@@ -200,6 +201,16 @@ class WebhookTests(unittest.TestCase):
         self.assertEqual(len(logs), 1)
 
 
+    def test_wake_http_exception_is_false_not_raised(self):
+        def opener(req, timeout=None, **k):
+            raise http.client.RemoteDisconnected("closed")
+        logs = []
+        self.assertFalse(gw.wake_grokbot("gizmo", "k", {"messages": []}, logs.append,
+                                         opener=opener, runner=ok_runner()))
+        self.assertEqual(len(logs), 1)
+        self.assertIn("RemoteDisconnected", logs[0])
+
+
 class TargetTests(unittest.TestCase):
     def test_tag_wakes(self):
         m = msg(mentions=[BOT])
@@ -259,9 +270,10 @@ class TargetTests(unittest.TestCase):
         m2 = msg(author=TEAMBOT, mentions=[BOT], reply_to="800000000000000002", bot=True)
         self.assertTrue(gw.grokbot_targets(m2, PRIVATE, agent(), {ask}))
 
-    def test_thread_id(self):
-        self.assertEqual(gw.thread_id(msg(mid="5")), "5")
-        self.assertEqual(gw.thread_id(msg(mid="5", reply_to="3")), "3")
+    def test_everyone_in_private_channel_wakes_but_not_in_general(self):
+        # a human @everyone in the agent's own channel is addressed to it
+        self.assertTrue(gw.grokbot_targets(msg(everyone=True), PRIVATE, agent(), set()))
+        self.assertFalse(gw.grokbot_targets(msg(everyone=True), GENERAL, agent(), set()))
 
 
 class TicketTests(unittest.TestCase):
@@ -277,24 +289,33 @@ class TicketTests(unittest.TestCase):
                 ]}, fh)
             self.assertEqual(gw.TicketReader(p, lambda s: None).ask_ids(), {"11", "12"})
 
-    def test_missing_or_garbage_file_is_empty_and_logs_once(self):
+    def test_missing_or_garbage_file_is_empty_and_logs_once_per_interval(self):
         logs = []
+        clock = FakeClock()
         with tempfile.TemporaryDirectory() as d:
-            r = gw.TicketReader(os.path.join(d, "none.json"), logs.append)
+            r = gw.TicketReader(os.path.join(d, "none.json"), logs.append, clock)
             self.assertEqual(r.ask_ids(), set())
+            self.assertEqual(r.ask_ids(), set())
+            clock.t += gw.TICKET_WARN_INTERVAL - 1
             self.assertEqual(r.ask_ids(), set())
             self.assertEqual(len(logs), 1)
+            self.assertIn("WARNING", logs[0])
+            clock.t += 2
+            r.ask_ids()
+            self.assertEqual(len(logs), 2)
             p = os.path.join(d, "bad.json")
             with open(p, "w") as fh:
                 fh.write("{not json")
             logs2 = []
-            r2 = gw.TicketReader(p, logs2.append)
+            r2 = gw.TicketReader(p, logs2.append, FakeClock())
             self.assertEqual(r2.ask_ids(), set())
             self.assertEqual(r2.ask_ids(), set())
             self.assertEqual(len(logs2), 1)
 
-    def test_unset_path_is_empty(self):
-        self.assertEqual(gw.TicketReader("", lambda s: None).ask_ids(), set())
+    def test_unset_path_is_empty_and_quiet(self):
+        logs = []
+        self.assertEqual(gw.TicketReader("", logs.append).ask_ids(), set())
+        self.assertEqual(logs, [])
 
 
 class GateTests(unittest.TestCase):
@@ -330,25 +351,60 @@ class GateTests(unittest.TestCase):
         clock.t += 120
         self.assertEqual(g.admit("a", "t", False, noon()), "send")
 
-    def test_thread_hop_cap(self):
+    def _wake(self, g, alias, channel, is_bot, n, t=None):
+        """admit + hold + drain, the way GrokWaker drives the gate."""
+        v = g.admit(alias, channel, is_bot, t or noon())
+        if v == "send":
+            g.hold(alias, {"message_id": str(n), "channel_id": channel}, is_bot)
+            g.drain(alias, t or noon(), force=True)
+        return v
+
+    def test_channel_hop_cap(self):
         clock = FakeClock()
         logs = []
         g = gw.WakeGate(clock, log=logs.append)
         out = []
-        for _ in range(5):
-            out.append(g.admit("gizmo", "thread-1", True, noon()))
+        for n in range(5):
+            out.append(self._wake(g, "gizmo", GENERAL, True, n))
             clock.t += 200
         self.assertEqual(out, ["send"] * 4 + ["drop"])
         self.assertEqual(len(logs), 1)
-        # a different thread is unaffected
-        self.assertEqual(g.admit("gizmo", "thread-2", True, noon()), "send")
-        # humans are not capped
-        for _ in range(6):
+        self.assertIn(GENERAL, logs[0])
+        # a different channel and a different agent are unaffected
+        self.assertEqual(self._wake(g, "gizmo", PRIVATE, True, 9), "send")
+        self.assertEqual(self._wake(g, "other", GENERAL, True, 9), "send")
+        # humans are not capped, and do not spend the budget
+        for n in range(6):
             clock.t += 200
-            self.assertEqual(g.admit("gizmo", "thread-1", False, noon()), "send")
+            self.assertEqual(self._wake(g, "gizmo", GENERAL, False, n), "send")
         # the cap is per hour
         clock.t += 3600
-        self.assertEqual(g.admit("gizmo", "thread-1", True, noon()), "send")
+        self.assertEqual(self._wake(g, "gizmo", GENERAL, True, 99), "send")
+
+    def test_hop_cap_counts_at_send_time_not_admit_time(self):
+        clock = FakeClock()
+        g = gw.WakeGate(clock, quiet_hours={"gizmo"})
+        # six bot messages overnight: all held, none dropped, none counted
+        for n in range(6):
+            self.assertEqual(g.admit("gizmo", GENERAL, True, at_2am()), "hold")
+            g.hold("gizmo", {"message_id": str(n), "channel_id": GENERAL}, True)
+        morning = datetime(2026, 10, 28, 7, 0, tzinfo=DENVER)
+        clock.t += 8 * 3600
+        # they go out as one wake, which counts once
+        self.assertEqual(len(g.drain("gizmo", morning)), 6)
+        clock.t += 200
+        self.assertEqual(self._wake(g, "gizmo", GENERAL, True, 50, morning), "send")
+
+    def test_failed_send_does_not_spend_hop_budget(self):
+        clock = FakeClock()
+        g = gw.WakeGate(clock)
+        for n in range(gw.HOP_CAP):
+            self.assertEqual(g.admit("a", GENERAL, True, noon()), "send")
+            g.hold("a", {"message_id": str(n), "channel_id": GENERAL}, True)
+            g.drain("a", noon(), force=True)
+            g.failed("a")
+            clock.t += 200
+        self.assertEqual(g.admit("a", GENERAL, True, noon()), "send")
 
     def test_quiet_hours_hold_bots_not_humans(self):
         clock = FakeClock()
@@ -482,6 +538,216 @@ class LoaderTests(unittest.TestCase):
             self.assertEqual(g["allow_from"], set())
             self.assertEqual(g["allow_bots"], {TEAMBOT})
             self.assertEqual(g["allowed_channels"], set())
+
+
+    def test_quiet_tz_defaults_and_overrides(self):
+        for tz_cfg, want in ((None, "America/Denver"), ("Europe/London", "Europe/London")):
+            with tempfile.TemporaryDirectory() as root:
+                gb = {"quiet_hours": True}
+                if tz_cfg:
+                    gb["quiet_tz"] = tz_cfg
+                self._write(root, "gizmo", {
+                    "platform": "grok-bot", "alias": "gizmo",
+                    "discord": {"bot_id": BOT, "private_channel_id": PRIVATE},
+                    "grokbot": gb})
+                _, groks, _ = gw.load_fleet_agents(root)
+                self.assertEqual(groks["gizmo"]["quiet_tz"], want)
+
+    def test_bad_quiet_tz_is_an_error(self):
+        with tempfile.TemporaryDirectory() as root:
+            self._write(root, "gizmo", {
+                "platform": "grok-bot", "alias": "gizmo",
+                "discord": {"bot_id": BOT, "private_channel_id": PRIVATE},
+                "grokbot": {"quiet_hours": True, "quiet_tz": "Not/AZone"}})
+            with self.assertRaises(gw.FleetConfigError):
+                gw.load_fleet_agents(root)
+
+
+def gagent(**over):
+    a = agent(webhook_pass_key="fleet/x", tickets_file="", quiet_hours=False,
+              quiet_tz="America/Denver", allowed_channels={PRIVATE, GENERAL})
+    a.update(over)
+    return a
+
+
+class WakerHarness:
+    """A GrokWaker with fakes for send, log, clock and local time."""
+
+    def __init__(self, agents, tickets=None, send=None, now=None):
+        self.agents = agents
+        self.logs = []
+        self.sent = []          # (alias, body)
+        self.clock = FakeClock()
+        self.local = now or noon()
+        self.tz_asked = []
+        self.fail = set()       # aliases whose send returns False
+        self.raise_for = set()  # aliases whose send raises
+        self.gate = gw.WakeGate(
+            self.clock, quiet_hours={a for a, x in agents.items() if x["quiet_hours"]},
+            log=self.logs.append)
+        tk = tickets or {a: gw.TicketReader("", self.logs.append, self.clock) for a in agents}
+
+        def send_(alias, key, body):
+            if alias in self.raise_for:
+                raise http.client.RemoteDisconnected("boom")
+            if alias in self.fail:
+                return False
+            self.sent.append((alias, body))
+            return True
+
+        def now_(tz):
+            self.tz_asked.append(tz)
+            return self.local
+
+        self.w = gw.GrokWaker(agents, self.gate, tk, send or send_, self.logs.append, now_)
+
+    def ids(self, i=-1):
+        return [m["message_id"] for m in self.sent[i][1]["messages"]]
+
+
+class WakerTests(unittest.TestCase):
+    def test_bot_reply_chain_hits_the_channel_cap(self):
+        # bot -> agent -> bot -> agent ...: each message replies to the one
+        # before it, so a per-reply-parent key would never accumulate.
+        h = WakerHarness({"gizmo": gagent()})
+        prev = None
+        n = 0
+        sent_counts = []
+        for i in range(5):
+            n += 1
+            bot_id = "9%017d" % n
+            h.w.handle(msg(author=TEAMBOT, mid=bot_id, reply_to=prev, bot=True,
+                           mentions=[BOT]), GENERAL)
+            sent_counts.append(len(h.sent))
+            n += 1
+            prev = "9%017d" % n       # the agent's own reply, which never wakes
+            h.w.handle(msg(author=BOT, mid=prev, reply_to=bot_id, bot=True), GENERAL)
+            h.clock.t += 200
+        self.assertEqual(sent_counts, [1, 2, 3, 4, 4])
+        self.assertTrue(any("DROP" in line for line in h.logs))
+        # a different channel is unaffected
+        h.w.handle(msg(author=TEAMBOT, mid="9" + "0" * 16 + "7", bot=True), PRIVATE)
+        self.assertEqual(len(h.sent), 5)
+
+    def test_send_exception_requeues_and_retries(self):
+        h = WakerHarness({"gizmo": gagent()})
+        h.raise_for = {"gizmo"}
+        h.w.handle(msg(mid="900000000000000001"), PRIVATE)   # must not raise
+        self.assertEqual(h.sent, [])
+        self.assertTrue(any("RemoteDisconnected" in line for line in h.logs))
+        h.raise_for = set()
+        h.w.drain()                       # still backing off
+        self.assertEqual(h.sent, [])
+        h.clock.t += gw.IN_FLIGHT_SECONDS
+        h.w.drain()
+        self.assertEqual(h.ids(), ["900000000000000001"])
+
+    def test_failed_send_returning_false_requeues(self):
+        h = WakerHarness({"gizmo": gagent()})
+        h.fail = {"gizmo"}
+        h.w.handle(msg(mid="900000000000000001"), PRIVATE)
+        h.fail = set()
+        h.clock.t += gw.IN_FLIGHT_SECONDS
+        h.w.drain()
+        self.assertEqual(h.ids(), ["900000000000000001"])
+
+    def test_one_failing_agent_does_not_stop_the_others_draining(self):
+        other_bot = "121212121212121212"
+        h = WakerHarness({
+            "a": gagent(alias="a"),
+            "b": gagent(alias="b", bot_id=other_bot, private_channel_id=GENERAL,
+                        allowed_channels={GENERAL}),
+        })
+        # a message in each agent's private channel, then a second one held
+        h.w.handle(msg(mid="900000000000000001"), PRIVATE)
+        h.w.handle(msg(mid="900000000000000002"), GENERAL)
+        h.w.handle(msg(mid="900000000000000003"), PRIVATE)
+        h.w.handle(msg(mid="900000000000000004"), GENERAL)
+        self.assertEqual(len(h.sent), 2)
+        h.clock.t += gw.IN_FLIGHT_SECONDS
+        h.raise_for = {"a"}
+        h.w.drain()
+        self.assertEqual([x[0] for x in h.sent], ["a", "b", "b"])
+        self.assertEqual(h.ids(), ["900000000000000004"])
+        h.raise_for = set()
+        h.clock.t += gw.IN_FLIGHT_SECONDS
+        h.w.drain()
+        self.assertEqual(h.sent[-1][0], "a")
+        self.assertEqual(h.ids(), ["900000000000000003"])
+
+    def test_error_in_one_agent_does_not_block_handling_for_the_next(self):
+        a = gagent(alias="a")
+        b = gagent(alias="b", bot_id="121212121212121212")
+        h = WakerHarness({"a": a, "b": b})
+        h.w.tickets["a"] = None   # a's ticket lookup now raises
+        h.w.handle(msg(mid="900000000000000001"), PRIVATE)
+        self.assertEqual([x[0] for x in h.sent], ["b"])
+        self.assertTrue(any("error handling" in line for line in h.logs))
+
+    def test_quiet_hours_hold_then_morning_drain(self):
+        h = WakerHarness({"gizmo": gagent(quiet_hours=True, quiet_tz="Europe/London")},
+                         now=at_2am())
+        h.w.handle(msg(author=TEAMBOT, mid="900000000000000001", bot=True), PRIVATE)
+        h.clock.t += 500
+        h.w.drain()
+        self.assertEqual(h.sent, [])
+        self.assertEqual(set(h.tz_asked), {"Europe/London"})
+        h.local = datetime(2026, 10, 28, 7, 0, tzinfo=DENVER)
+        h.w.drain()
+        self.assertEqual(len(h.sent), 1)
+        self.assertEqual(h.ids(), ["900000000000000001"])
+
+    def test_quiet_hours_human_goes_straight_through(self):
+        h = WakerHarness({"gizmo": gagent(quiet_hours=True)}, now=at_2am())
+        h.w.handle(msg(mid="900000000000000001"), PRIVATE)
+        self.assertEqual(len(h.sent), 1)
+
+    def test_non_quiet_agent_never_asks_for_local_time(self):
+        h = WakerHarness({"gizmo": gagent()})
+        h.w.handle(msg(mid="900000000000000001"), PRIVATE)
+        h.w.drain()
+        self.assertEqual(h.tz_asked, [])
+
+    def test_unaddressed_and_unlisted_messages_send_nothing(self):
+        h = WakerHarness({"gizmo": gagent()})
+        h.w.handle(msg(mid="900000000000000001"), GENERAL)                         # untagged
+        h.w.handle(msg(author=STRANGER, mid="900000000000000002", mentions=[BOT]), GENERAL)
+        self.assertEqual(h.sent, [])
+
+    def test_reply_to_own_ask_is_ignored_via_tickets(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "t.json")
+            with open(p, "w") as fh:
+                json.dump({"tickets": [{"ask_message_id": "800000000000000001"}]}, fh)
+            logs = []
+            h = WakerHarness({"gizmo": gagent(tickets_file=p)},
+                             tickets={"gizmo": gw.TicketReader(p, logs.append)})
+            h.w.handle(msg(author=TEAMBOT, mid="900000000000000001", bot=True,
+                           reply_to="800000000000000001"), PRIVATE)
+            self.assertEqual(h.sent, [])
+
+    def test_startup_check_warns(self):
+        with tempfile.TemporaryDirectory() as d:
+            missing = os.path.join(d, "none.json")
+            logs = []
+            clock = FakeClock()
+            agents = {
+                "a": gagent(alias="a", allowed_channels={GENERAL}, tickets_file=missing),
+                "b": gagent(alias="b", webhook_pass_key="", tickets_file=""),
+                "c": gagent(alias="c", tickets_file=missing),
+            }
+            h = WakerHarness(agents, tickets={
+                "a": gw.TicketReader(missing, logs.append, clock),
+                "b": gw.TicketReader("", logs.append, clock),
+                "c": gw.TicketReader(missing, logs.append, clock)})
+            h.w.log = logs.append
+            h.w.startup_check()
+            text = "\n".join(logs)
+            self.assertIn("a: private channel", text)
+            self.assertNotIn("c: private channel", text)
+            self.assertIn("b: no grokbot.webhook_pass_key", text)
+            self.assertIn("b: no grokbot.tickets_file", text)
+            self.assertEqual(text.count("none.json"), 2)   # a and c, unreadable
 
 
 if __name__ == "__main__":

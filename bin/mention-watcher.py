@@ -116,21 +116,19 @@ last_seen: dict[str, str] = {}
 
 # Grok Bot agents are woken by webhook (see grokbot_wake.py), with their own
 # allowlist, ticket file and throttle. None of this touches the tmux path.
-GROK_GATE = grokbot_wake.WakeGate(
-    time.monotonic,
-    quiet_hours={alias for alias, a in GROK_AGENTS.items() if a["quiet_hours"]},
+GROK = grokbot_wake.GrokWaker(
+    GROK_AGENTS,
+    grokbot_wake.WakeGate(
+        time.monotonic,
+        quiet_hours={alias for alias, a in GROK_AGENTS.items() if a["quiet_hours"]},
+        log=lambda m: log(m),
+    ),
+    {alias: grokbot_wake.TicketReader(a["tickets_file"], lambda m: log(m))
+     for alias, a in GROK_AGENTS.items()},
+    send=lambda alias, key, body: grokbot_wake.wake_grokbot(
+        alias, key, body, log, context=SSL_CTX),
     log=lambda m: log(m),
 )
-GROK_TICKETS = {
-    alias: grokbot_wake.TicketReader(a["tickets_file"], lambda m: log(m))
-    for alias, a in GROK_AGENTS.items()
-}
-if GROK_GATE.quiet:
-    try:
-        grokbot_wake.now_quiet_tz()
-    except Exception as _exc:  # ZoneInfoNotFoundError: no tzdata on this host
-        sys.exit(f"mention-watcher: quiet_hours needs the {grokbot_wake.QUIET_TZ} "
-                 f"timezone database ({type(_exc).__name__}); install tzdata.")
 
 # ── Access control ──────────────────────────────────────────────────────────
 # Waking an agent types text straight into a tool-capable pane, so the author of
@@ -501,55 +499,6 @@ def log(msg: str):
     print(f"[{ts}] {msg}", flush=True)
 
 
-def _wake_grok_batch(alias: str, batch: list) -> None:
-    """Send one coalesced webhook body; put the batch back if it did not land."""
-    agent = GROK_AGENTS[alias]
-    key = agent["webhook_pass_key"]
-    if not key:
-        log(f"  {alias}: no grokbot.webhook_pass_key configured, cannot wake")
-        return
-    body = {"messages": batch}
-    if not grokbot_wake.wake_grokbot(alias, key, body, log, context=SSL_CTX):
-        GROK_GATE.failed(alias)
-
-
-def handle_grokbot(msg: dict, channel_id: str) -> None:
-    """Wake every Grok Bot agent this message is addressed to, if it may."""
-    if not GROK_AGENTS:
-        return
-    author = msg.get("author") or {}
-    is_bot = bool(author.get("bot"))
-    for alias, agent in GROK_AGENTS.items():
-        grokbot_wake.refresh_access(agent, log)
-        if not grokbot_wake.grokbot_targets(msg, channel_id, agent,
-                                            GROK_TICKETS[alias].ask_ids()):
-            continue
-        payload = grokbot_wake.build_payload(msg, channel_id)
-        log(f"Grok mention from {payload['author']} for {alias}: "
-            f"\"{payload['text'][:80]}\"")
-        now_local = grokbot_wake.now_quiet_tz() if alias in GROK_GATE.quiet else None
-        verdict = GROK_GATE.admit(alias, grokbot_wake.thread_id(msg), is_bot, now_local)
-        if verdict == "drop":
-            continue
-        GROK_GATE.hold(alias, payload, is_bot)
-        if verdict == "hold":
-            log(f"  {alias}: held (wake in flight or quiet hours)")
-            continue
-        batch = GROK_GATE.drain(alias, now_local, force=True)
-        if batch:
-            _wake_grok_batch(alias, batch)
-
-
-def drain_grokbot() -> None:
-    """Release anything held once the in-flight window or quiet hours end."""
-    for alias in GROK_AGENTS:
-        now_local = grokbot_wake.now_quiet_tz() if alias in GROK_GATE.quiet else None
-        batch = GROK_GATE.drain(alias, now_local)
-        if batch:
-            log(f"  {alias}: releasing {len(batch)} held message(s)")
-            _wake_grok_batch(alias, batch)
-
-
 def extract_mentioned_agents(message: dict) -> set[str]:
     """Return set of tmux window names for agents mentioned in this message."""
     targets = set()
@@ -611,10 +560,7 @@ def poll():
                 if not after or int(msg_id) > int(after or "0"):
                     last_seen[channel_id] = msg_id
 
-                try:
-                    handle_grokbot(msg, channel_id)
-                except Exception as e:
-                    log(f"Error in grok-bot handling for message {msg_id}: {e}")
+                GROK.handle(msg, channel_id)
 
                 targets = extract_mentioned_agents(msg)
                 if not targets:
@@ -677,7 +623,8 @@ def main():
         # Counts only: the ids stay out of the log.
         log(f"  grok-bot {alias}: webhook wake, {len(a['allowed_channels'])} channels, "
             f"{len(a['allow_from'])} humans, {len(a['allow_bots'])} bots allowed"
-            f"{', quiet hours' if a['quiet_hours'] else ''}")
+            f"{', quiet hours ' + a['quiet_tz'] if a['quiet_hours'] else ''}")
+    GROK.startup_check()
     log(f"Poll interval: {POLL_INTERVAL}s")
 
     seed_last_seen()
@@ -687,7 +634,7 @@ def main():
     while True:
         try:
             poll()
-            drain_grokbot()
+            GROK.drain()
             heartbeat()
         except KeyboardInterrupt:
             log("Shutting down")
