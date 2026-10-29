@@ -185,6 +185,16 @@ harness/grokbot/install/verify-confinement.sh "$AGENT" --app
   `ProcSubset=pid` before anything else; `--no-sandbox` only with the logged
   error.
 
+## Firewall persistence
+
+The rules live only in the kernel. A `nft flush ruleset`, or restarting
+`nftables.service` with a stock config, removes the table while the app keeps
+running, and the app is then unconfined on the network. The app unit refuses to
+start without the table (an `ExecStartPre` checks), but that does not stop a
+running app. After any firewall change, run
+`systemctl restart "$AGENT-egress" "$AGENT-app"`, then run
+`install/verify-confinement.sh "$AGENT" --app`.
+
 ## Removing it
 
 Stop the units, then delete the firewall table by hand, because stopping the

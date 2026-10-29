@@ -1,5 +1,6 @@
 [Unit]
 Description=__AGENT__ egress firewall (nftables)
+After=nftables.service
 Before=__AGENT__-app.service
 
 [Service]
