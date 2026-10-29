@@ -49,7 +49,8 @@ OPERATOR=youruser
 ```
 
 The broker's user name is `AGENT-broker`, and Linux user names stop at 32
-characters, so keep AGENT to 24 characters or fewer.
+characters, so AGENT is limited to 24 characters (render.sh and the verify
+script enforce it).
 
 1. Render the templates.
 
@@ -171,8 +172,18 @@ harness/grokbot/install/verify-confinement.sh "$AGENT" --app
 - The app unit hides paths that do not exist on every box with a leading `-`.
   Edit its `InaccessiblePaths` for the directories the agent must not see on
   yours.
-- The network probes in the verify script expect a drop (curl exit 28). A
-  refusal means the rule is not in effect.
+- The verify script probes loopback and the LAN gateway with a connect()
+  classifier run as the agent. A drop shows as an immediate EPERM or a timeout
+  ("blocked"). "refused" means the packet got through, so it fails. A control
+  probe run as root must reach 127.0.0.1:22 first, or that check is skipped.
+- The agent is IPv4 only: the policy drops all its IPv6 traffic, and also
+  drops anything addressed to one of the box's own addresses.
+- DNS assumes the systemd-resolved stub at `127.0.0.53`. On a box without it,
+  the agent will not resolve names until the DNS rule is pointed at the right
+  resolver.
+- If the app won't start: check journalctl for the sandbox error first; drop
+  `ProcSubset=pid` before anything else; `--no-sandbox` only with the logged
+  error.
 
 ## Removing it
 

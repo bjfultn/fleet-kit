@@ -13,8 +13,10 @@
 #   VERIFY_PRIVATE_DIRS   dirs the agent must not read anything in
 #                         (default "/opt/web /home/ops")
 #
-# Network probes treat only curl exit 28 (timeout) as "blocked": the firewall
-# drops, it does not reject, so a refusal means the rule is not in effect.
+# Network probes use a small connect() classifier run as the agent. The
+# firewall's drop makes connect() fail at once with EPERM (or time out), which
+# is "blocked". "refused" means the packet got through to a closed port, and
+# "open" means it connected: both FAIL.
 set -u
 
 usage() { echo "usage: $0 AGENT [--app]" >&2; exit 2; }
@@ -26,8 +28,8 @@ if [ "$#" -eq 2 ]; then
     [ "$2" = "--app" ] || usage
     APP=1
 fi
-if ! [[ $AGENT =~ ^[a-z][a-z0-9-]{1,30}$ ]]; then
-    echo "verify: AGENT must match ^[a-z][a-z0-9-]{1,30}\$" >&2
+if ! [[ $AGENT =~ ^[a-z][a-z0-9-]{1,23}$ ]]; then
+    echo "verify: AGENT must match ^[a-z][a-z0-9-]{1,23}\$" >&2
     exit 2
 fi
 if [ "$(id -u)" -ne 0 ]; then
@@ -195,10 +197,42 @@ fi
 
 # --- network ---------------------------------------------------------------
 
-if have curl; then
-    as_agent curl -m3 -s -o /dev/null http://127.0.0.1:22/ >/dev/null 2>&1
-    rc=$?
-    if [ "$rc" -eq 28 ]; then pass "loopback service blocked (127.0.0.1:22)"; else fail "loopback service blocked (127.0.0.1:22)" "curl exit $rc, want 28"; fi
+# probe HOST PORT: prints blocked, open, refused or error:<Name>.
+PROBE='
+import socket, sys
+s = socket.socket()
+s.settimeout(5)
+try:
+    s.connect((sys.argv[1], int(sys.argv[2])))
+except PermissionError:
+    print("blocked")
+except (TimeoutError, socket.timeout):
+    print("blocked")
+except ConnectionRefusedError:
+    print("refused")
+except OSError as exc:
+    print("error:" + type(exc).__name__)
+else:
+    print("open")
+'
+probe_agent() { as_agent timeout 6 python3 -I -c "$PROBE" "$1" "$2" 2>/dev/null; }
+probe_root() { timeout 6 python3 -I -c "$PROBE" "$1" "$2" 2>/dev/null; }
+
+# expect_blocked NAME HOST PORT
+expect_blocked() {
+    local got
+    got=$(probe_agent "$2" "$3")
+    if [ "$got" = blocked ]; then pass "$1"; else fail "$1" "probe says ${got:-nothing}, want blocked"; fi
+}
+
+if have python3 && have timeout; then
+    # Control: root must be able to reach the loopback service, or there is
+    # nothing for the agent's probe to prove.
+    if [ "$(probe_root 127.0.0.1 22)" = open ]; then
+        expect_blocked "loopback service blocked (127.0.0.1:22)" 127.0.0.1 22
+    else
+        skip "loopback service blocked (127.0.0.1:22)" "control: root cannot connect to 127.0.0.1:22"
+    fi
 
     gw=$(ip -4 route show default 2>/dev/null | awk '{for (i = 1; i < NF; i++) if ($i == "via") { print $(i + 1); exit }}')
     if [ -z "$gw" ]; then
@@ -206,15 +240,17 @@ if have curl; then
     elif ! [[ $gw =~ ^(10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.|169\.254\.|100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.) ]]; then
         skip "LAN gateway blocked" "gateway $gw is not in a range the firewall blocks"
     else
-        as_agent curl -m3 -s -o /dev/null "http://$gw/" >/dev/null 2>&1
-        rc=$?
-        if [ "$rc" -eq 28 ]; then pass "LAN gateway blocked ($gw)"; else fail "LAN gateway blocked ($gw)" "curl exit $rc, want 28"; fi
+        expect_blocked "LAN gateway blocked ($gw:80)" "$gw" 80
     fi
+else
+    skip "loopback and LAN probes" "python3 or timeout not installed"
+fi
 
+if have curl; then
     as_agent curl -m5 -sI https://discord.com >/dev/null 2>&1
     expect_rc "https to discord.com works" "$?" ok
 else
-    skip "network probes" "curl not installed"
+    skip "https to discord.com works" "curl not installed"
 fi
 
 as_agent getent hosts discord.com >/dev/null 2>&1

@@ -13,6 +13,10 @@ table inet __AGENT___egress {
 
 		meta skuid "__AGENT__" ct state established,related accept
 
+		# The agent is IPv4 only. The v6 range drops further down stay as
+		# defense in depth.
+		meta skuid "__AGENT__" meta nfproto ipv6 drop
+
 		# DNS through the local stub resolver only.
 		meta skuid "__AGENT__" ip daddr 127.0.0.53 udp dport 53 accept
 		meta skuid "__AGENT__" ip daddr 127.0.0.53 tcp dport 53 accept
@@ -27,6 +31,9 @@ table inet __AGENT___egress {
 		meta skuid "__AGENT__" ip daddr 100.64.0.0/10 drop
 		meta skuid "__AGENT__" ip6 daddr fc00::/7 drop
 		meta skuid "__AGENT__" ip6 daddr fe80::/10 drop
+
+		# Never the box itself, through any of its own addresses.
+		meta skuid "__AGENT__" fib daddr type local drop
 
 		# Web only.
 		meta skuid "__AGENT__" tcp dport { 80, 443 } accept

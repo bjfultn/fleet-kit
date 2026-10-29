@@ -10,8 +10,8 @@ if [ "$#" -ne 2 ]; then
 fi
 agent=$1
 out=$2
-if ! [[ $agent =~ ^[a-z][a-z0-9-]{1,30}$ ]]; then
-    echo "render: AGENT must match ^[a-z][a-z0-9-]{1,30}\$" >&2
+if ! [[ $agent =~ ^[a-z][a-z0-9-]{1,23}$ ]]; then
+    echo "render: AGENT must match ^[a-z][a-z0-9-]{1,23}\$" >&2
     exit 2
 fi
 
