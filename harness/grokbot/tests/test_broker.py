@@ -175,6 +175,12 @@ class TestPost(BrokerCase):
         text, ids = bk.mentions("mail bob@sonnet.com or https://x.io/@sonnet or a@curtis", agents)
         self.assertEqual(ids, [])
         self.assertEqual(text, "mail bob@sonnet.com or https://x.io/@sonnet or a@curtis")
+        for src, want in (("(@here) ping", "(here) ping"), ('"@here" ping', '"here" ping'),
+                          ("@everyone's call", "everyone's call"), ("@here, @everyone!", "here, everyone!")):
+            self.assertEqual(bk.mentions(src, agents), (want, []))
+        text, ids = bk.mentions("@everyone@here", agents)
+        self.assertNotIn("@", text)
+        self.assertEqual(ids, [])
         text, ids = bk.mentions("write bob@here.com or x@everyone.org", agents)
         self.assertEqual((text, ids), ("write bob@here.com or x@everyone.org", []))
         text, ids = bk.mentions("@sonnet, ask @cage. and @nobody", agents)
@@ -807,6 +813,20 @@ class TestServer(BrokerCase):
             bk.make_server(bk.Broker(cfg, self.discord), cfg)
         self.assertIn("broker already running", str(cm.exception))
         self.assertTrue(rpc(path, {"op": "check"})["ok"])
+
+    def test_unanswering_socket_path_is_never_unlinked(self):
+        path = os.path.join(self.tmp, "broker.sock")
+        s = socket.socket(socket.AF_UNIX)
+        s.bind(path)
+        s.close()
+        cfg = make_config(self.tmp)
+        for exc in (PermissionError("no"), TimeoutError("slow")):
+            with mock.patch.object(socket.socket, "connect", side_effect=exc):
+                with self.assertRaises(SystemExit) as cm:
+                    bk.make_server(bk.Broker(cfg, self.discord), cfg)
+            self.assertEqual(str(cm.exception.code), "socket path in use and not answering; "
+                             "remove it if no broker is running")
+            self.assertTrue(os.path.exists(path))
 
     def test_handler_exception_does_not_kill_server(self):
         path = self.serve()

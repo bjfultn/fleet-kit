@@ -171,7 +171,10 @@ def _retry_seconds(raw, header):
 _AT_START = r"(?:(?<=\s)|^)@"
 _AT_END = r"(?=[.,;:!?)\]]*(?:\s|$))"
 _MENTION_RE = re.compile(_AT_START + r"([A-Za-z0-9_-]+)" + _AT_END)
-_BROADCAST_RE = re.compile(_AT_START + r"(everyone|here)" + _AT_END)
+# @everyone / @here are neutralized wherever they could be read as a broadcast:
+# after punctuation or quotes, before 's, or chained. Only an address-like
+# "word@here" (bob@here.com) is left alone.
+_BROADCAST_RE = re.compile(r"(?:(?<![\w.])|(?<=everyone)|(?<=here))@(everyone|here)\b")
 
 
 def mentions(text, agents):
@@ -803,6 +806,10 @@ class _Server(socketserver.ThreadingUnixStreamServer):
                 os.unlink(path)  # stale socket from a previous run
             except FileNotFoundError:
                 pass
+            except (TimeoutError, PermissionError):
+                # Something may own the path but will not talk to us: never unlink it.
+                raise SystemExit("socket path in use and not answering; "
+                                 "remove it if no broker is running") from None
             else:
                 raise BrokerError("broker already running")
             finally:
