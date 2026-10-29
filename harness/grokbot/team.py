@@ -86,6 +86,33 @@ def _build(args):
     raise ValueError("unknown op %r" % op)
 
 
+def _guard_text(argv):
+    """Put '--' in front of the text words, so a word starting with '-' is
+    never read as an option. For ask, the leading --wait option stays in front
+    of the separator, as does the agent."""
+    if not argv:
+        return argv
+    op = argv[0]
+    if op == "post":
+        start = 2
+    elif op == "reply":
+        start = 3
+    elif op == "ask":
+        start = 2
+        while start < len(argv):
+            if argv[start] == "--wait":
+                start += 2
+            elif argv[start].startswith("--wait="):
+                start += 1
+            else:
+                break
+    else:
+        return argv
+    if start >= len(argv):
+        return argv
+    return argv[:start] + ["--"] + argv[start:]
+
+
 def _parser():
     ap = argparse.ArgumentParser(prog="team", description="Talk to the team over the broker.")
     sub = ap.add_subparsers(dest="op", required=True)
@@ -163,7 +190,7 @@ def main(argv, connect=None):
     """Run one team command. Returns the exit status."""
     if connect is None:
         connect = unix_connect
-    args = _parser().parse_args(argv)
+    args = _parser().parse_args(_guard_text(argv))
     request, timeout = _build(args)
     try:
         resp = connect(request, timeout)
@@ -173,6 +200,10 @@ def main(argv, connect=None):
         return _fail(BUSY)
     except (socket.timeout, TimeoutError):
         return _fail(NO_ANSWER)
+    except OSError:
+        # Anything else from the socket (an over-long socket path, say) means
+        # the helper can't be reached.
+        return _fail(NOT_RUNNING)
     except ValueError:
         return _fail("team: the team helper sent a reply I couldn't read")
 

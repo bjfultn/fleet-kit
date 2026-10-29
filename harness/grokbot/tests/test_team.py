@@ -9,6 +9,7 @@ import json
 import os
 import shutil
 import socket
+import subprocess
 import sys
 import tempfile
 import threading
@@ -19,6 +20,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, ".."))
 
 import team  # noqa: E402
+
+TEAM_PY = os.path.join(HERE, "..", "team.py")
 
 NOT_RUNNING = "team: the team helper isn't running\n"
 BUSY = "team: the team helper is busy, try again in a moment\n"
@@ -100,7 +103,7 @@ class TeamTests(unittest.TestCase):
     def test_ask_prints_reply(self):
         fake = FakeBroker({"ok": True, "ticket": "ab12cd34", "status": "answered",
                            "reply": "Sonnet says hi"})
-        code, out, err = run(["ask", "sonnet", "hello", "there", "--wait", "5"], fake)
+        code, out, err = run(["ask", "sonnet", "--wait", "5", "hello", "there"], fake)
         self.assertEqual(code, 0)
         self.assertEqual(out, "Sonnet says hi\n")
         self.assertEqual(err, "")
@@ -210,7 +213,7 @@ class TeamTests(unittest.TestCase):
         run(["post", "general", "hi"], post)
         self.assertEqual(post.calls[0][1], 30)
         ask = FakeBroker({"ok": True, "ticket": "t", "status": "working", "reply": None})
-        run(["ask", "sonnet", "hi", "--wait", "10"], ask)
+        run(["ask", "sonnet", "--wait", "10", "hi"], ask)
         self.assertEqual(ask.calls[0][1], 10 + 30)
 
     def test_socket_path_default_and_override(self):
@@ -219,6 +222,35 @@ class TeamTests(unittest.TestCase):
             self.assertEqual(team.socket_path(), "/run/grokbot-broker/team.sock")
             env["TEAM_SOCKET"] = "/tmp/elsewhere.sock"
             self.assertEqual(team.socket_path(), "/tmp/elsewhere.sock")
+
+    def test_dash_text_is_not_an_option(self):
+        fake = FakeBroker({"ok": True, "message_id": "42"})
+        run(["post", "general", "-hello", "there"], fake)
+        self.assertEqual(fake.calls[-1][0]["text"], "-hello there")
+        run(["post", "general", "hello", "-world"], fake)
+        self.assertEqual(fake.calls[-1][0]["text"], "hello -world")
+        run(["reply", "general", "12345", "-ok", "then"], fake)
+        self.assertEqual(fake.calls[-1][0]["text"], "-ok then")
+        self.assertEqual(fake.calls[-1][0]["message_id"], "12345")
+        ask = FakeBroker({"ok": True, "ticket": "t", "status": "working", "reply": None})
+        run(["ask", "sonnet", "-hello", "there"], ask)
+        self.assertEqual(ask.calls[0][0], {"op": "ask", "agent": "sonnet",
+                                           "text": "-hello there", "wait": 60})
+
+    def test_wait_before_dash_text(self):
+        ask = FakeBroker({"ok": True, "ticket": "t", "status": "working", "reply": None})
+        run(["ask", "sonnet", "--wait", "5", "-hello", "there"], ask)
+        self.assertEqual(ask.calls[0][0], {"op": "ask", "agent": "sonnet",
+                                           "text": "-hello there", "wait": 5})
+        self.assertEqual(ask.calls[0][1], 5 + 30)
+        run(["ask", "sonnet", "--wait=7", "hi"], ask)
+        self.assertEqual(ask.calls[1][0]["wait"], 7)
+        self.assertEqual(ask.calls[1][0]["text"], "hi")
+
+    def test_oserror_is_not_running(self):
+        fake = FakeBroker(error=OSError("AF_UNIX path too long"))
+        code, out, err = run(["check"], fake)
+        self.assertEqual((code, out, err), (1, "", NOT_RUNNING))
 
 
 class RealSocketTests(unittest.TestCase):
@@ -251,6 +283,21 @@ class RealSocketTests(unittest.TestCase):
     def test_default_connect_broker_down(self):
         code, out, err = run(["check"], None)
         self.assertEqual((code, out, err), (1, "", NOT_RUNNING))
+
+    def test_overlong_socket_path_is_not_running(self):
+        self.path = "/tmp/" + "x" * 120
+        with mock.patch.dict(os.environ, {"TEAM_SOCKET": self.path}):
+            code, out, err = run(["check"], None)
+        self.assertEqual((code, out, err), (1, "", NOT_RUNNING))
+
+    def test_cli_overlong_socket_path_has_no_traceback(self):
+        env = dict(os.environ, TEAM_SOCKET="/tmp/" + "x" * 120)
+        proc = subprocess.run([sys.executable, TEAM_PY, "post", "general", "hi"],
+                              env=env, capture_output=True, text=True, timeout=30)
+        self.assertEqual(proc.returncode, 1)
+        self.assertEqual(proc.stderr, NOT_RUNNING)
+        self.assertEqual(proc.stdout, "")
+        self.assertNotIn("Traceback", proc.stderr)
 
 
 if __name__ == "__main__":
