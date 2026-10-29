@@ -34,7 +34,7 @@ PLATFORM = "grok-bot"
 
 TEXT_LIMIT = 1500          # characters of message text sent to the webhook
 WEBHOOK_TIMEOUT = 10       # seconds
-IN_FLIGHT_SECONDS = 120    # one wake per agent per this long; the rest coalesce
+IN_FLIGHT_SECONDS = 30     # one wake per agent per this long; the rest coalesce
 HOP_CAP = 4                # bot-authored wakes per channel per hour
 HOP_WINDOW = 3600
 MAX_HELD = 20              # held payloads per agent; oldest dropped beyond this
