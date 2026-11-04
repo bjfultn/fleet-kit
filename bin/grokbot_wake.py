@@ -579,6 +579,14 @@ def load_fleet_agents(agents_dir: str, general_channel_id: str = ""):
         # An agent may also name a general channel of its own; honour it so a
         # fleet can be split across more than one shared room.
         watch(discord_cfg.get("general_channel_id"))
+        # An agent the watcher feeds (`inbound: "watcher"`) has no plugin to
+        # hear a mention in its other access.json groups, so poll those too.
+        # Read once at startup: a group added later needs a watcher restart.
+        state_dir = str(discord_cfg.get("state_dir") or "").strip()
+        if discord_cfg.get("inbound") == "watcher" and state_dir:
+            parsed = _read_access(os.path.join(os.path.expanduser(state_dir), "access.json"))
+            for cid in sorted(parsed[0] if parsed else ()):
+                watch(cid)
 
     if missing:
         raise FleetConfigError(

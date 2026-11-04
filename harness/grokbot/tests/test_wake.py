@@ -682,7 +682,9 @@ class LoaderTests(unittest.TestCase):
             self._write(root, "geminy", {
                 "alias": "geminy",
                 "discord": {"bot_id": BOT, "private_channel_id": PRIVATE,
-                            "inbound": "watcher"}})
+                            "inbound": "watcher",
+                            "state_dir": os.path.join(root, "state-geminy")}},
+                access={"groups": {PRIVATE: {}, "300000000000000009": {"requireMention": True}}})
             self._write(root, "gizmo", {
                 "platform": "grok-bot", "alias": "gizmo",
                 "discord": {"bot_id": TEAMBOT, "private_channel_id": OTHER,
@@ -692,6 +694,8 @@ class LoaderTests(unittest.TestCase):
             self.assertEqual(home, {"geminy": PRIVATE})
             self.assertEqual(agents[BOT], "geminy")
             self.assertIn(PRIVATE, channels)
+            # its other groups are polled, since no plugin hears a mention there
+            self.assertIn("300000000000000009", channels)
             # every message in its own channel, mention or not
             self.assertEqual(gw.home_channel_targets(msg(), PRIVATE, home, agents),
                              {"geminy"})
