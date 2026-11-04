@@ -593,6 +593,44 @@ def load_fleet_agents(agents_dir: str, general_channel_id: str = ""):
     return agents, groks, channels
 
 
+def load_home_channel_agents(agents_dir: str) -> dict:
+    """Map tmux window -> private channel for agents the watcher must feed itself.
+
+    An agent opts in with `discord.inbound: "watcher"`. That is for a harness
+    with no Discord plugin to deliver inbound (it can still send through the
+    plugin as an MCP server), so the watcher is its only ear: it hears every
+    message in its private channel, not just mentions, and is woken even when
+    the pane looks busy. Run load_fleet_agents first; it validates the configs,
+    so an unreadable one is skipped here rather than reported twice.
+    """
+    home: dict = {}
+    for name in sorted(os.listdir(agents_dir)):
+        cfg_path = os.path.join(agents_dir, name, "config.json")
+        try:
+            with open(cfg_path) as fh:
+                cfg = json.load(fh)
+        except (OSError, ValueError):
+            continue
+        if cfg.get("platform") == PLATFORM:
+            continue
+        discord_cfg = cfg.get("discord", {})
+        private = str(discord_cfg.get("private_channel_id") or "").strip()
+        if discord_cfg.get("inbound") == "watcher" and private:
+            home[cfg.get("alias") or cfg.get("name", name).lower()] = private
+    return home
+
+
+def home_channel_targets(message: dict, channel_id: str, home: dict, agents: dict) -> set:
+    """Windows that hear this message because it was posted in their own channel.
+
+    `agents` is the bot id -> window map, used so an agent is never woken by
+    its own post.
+    """
+    author_id = message.get("author", {}).get("id", "")
+    return {window for window, private in home.items()
+            if private == channel_id and agents.get(author_id) != window}
+
+
 # ── The glue the watcher calls ──────────────────────────────────────────────
 
 class GrokWaker:

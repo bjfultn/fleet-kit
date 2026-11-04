@@ -673,6 +673,34 @@ class LoaderTests(unittest.TestCase):
             self.assertFalse(gw.grokbot_targets(msg(mentions=[BOT]), PRIVATE, g, {}))
             self.assertIn(PRIVATE, channels)
 
+    def test_home_channel_agents(self):
+        with tempfile.TemporaryDirectory() as root:
+            self._write(root, "claudey", {
+                "alias": "claudey",
+                "discord": {"bot_id": "100000000000000001",
+                            "private_channel_id": "200000000000000001"}})
+            self._write(root, "geminy", {
+                "alias": "geminy",
+                "discord": {"bot_id": BOT, "private_channel_id": PRIVATE,
+                            "inbound": "watcher"}})
+            self._write(root, "gizmo", {
+                "platform": "grok-bot", "alias": "gizmo",
+                "discord": {"bot_id": TEAMBOT, "private_channel_id": OTHER,
+                            "inbound": "watcher"}})
+            agents, _, channels = gw.load_fleet_agents(root)
+            home = gw.load_home_channel_agents(root)
+            self.assertEqual(home, {"geminy": PRIVATE})
+            self.assertEqual(agents[BOT], "geminy")
+            self.assertIn(PRIVATE, channels)
+            # every message in its own channel, mention or not
+            self.assertEqual(gw.home_channel_targets(msg(), PRIVATE, home, agents),
+                             {"geminy"})
+            # nothing elsewhere
+            self.assertEqual(gw.home_channel_targets(msg(), GENERAL, home, agents), set())
+            # never its own post
+            self.assertEqual(gw.home_channel_targets(msg(author=BOT), PRIVATE, home, agents),
+                             set())
+
     def test_missing_bot_id_is_an_error(self):
         with tempfile.TemporaryDirectory() as root:
             self._write(root, "gizmo", {"platform": "grok-bot", "alias": "gizmo",

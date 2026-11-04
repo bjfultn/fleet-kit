@@ -108,6 +108,8 @@ def _load_fleet_agents(agents_dir: str | None = None, general_channel_id: str | 
 
 AGENTS, GROK_AGENTS, CHANNELS = _load_fleet_agents()
 GROK_BY_ID = {a["bot_id"]: a for a in GROK_AGENTS.values()}
+# Agents with no plugin inbound (`discord.inbound: "watcher"`): window -> channel.
+HOME_CHANNEL_AGENTS = grokbot_wake.load_home_channel_agents(AGENTS_DIR)
 
 ENFORCE = os.environ.get("MENTION_WATCHER_ENFORCE", "0") == "1"
 
@@ -562,7 +564,8 @@ def poll():
 
                 GROK.handle(msg, channel_id)
 
-                targets = extract_mentioned_agents(msg)
+                targets = extract_mentioned_agents(msg) | grokbot_wake.home_channel_targets(
+                    msg, channel_id, HOME_CHANNEL_AGENTS, AGENTS)
                 if not targets:
                     # A message that tagged SOMETHING and woke nobody is the
                     # single most common "why is my agent asleep" case, and it
@@ -600,7 +603,9 @@ def poll():
                         log(f"  {verb} {window_name}: author {author} ({author_id}) {reason}")
                         if ENFORCE:
                             continue
-                    if should_wake_agent(window_name):
+                    # No plugin delivers to a home-channel agent, so a busy
+                    # pane is no reason to stand down; its harness queues it.
+                    if window_name in HOME_CHANNEL_AGENTS or should_wake_agent(window_name):
                         log(f"  {window_name}: waking up")
                         wake_agent(window_name, author, channel_id, content, msg_timestamp, msg_id)
                     else:
@@ -624,6 +629,8 @@ def main():
         log(f"  grok-bot {alias}: webhook wake, {len(a['allowed_channels'])} channels, "
             f"{len(a['allow_from'])} humans, {len(a['allow_bots'])} bots allowed"
             f"{', quiet hours ' + a['quiet_tz'] if a['quiet_hours'] else ''}")
+    for alias in HOME_CHANNEL_AGENTS:
+        log(f"  {alias}: hears every message in its own channel (inbound: watcher)")
     GROK.startup_check()
     log(f"Poll interval: {POLL_INTERVAL}s")
 
