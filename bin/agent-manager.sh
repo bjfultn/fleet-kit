@@ -69,9 +69,18 @@ print(' '.join(f\"{k}={v.replace('~', os.path.expanduser('~'))}\" for k,v in env
 }
 
 ensure_tmux_session() {
-    if ! tmux has-session -t "$TMUX_SESSION" 2>/dev/null; then
-        tmux new-session -d -s "$TMUX_SESSION" -n "manager"
+    tmux has-session -t "$TMUX_SESSION" 2>/dev/null && return 0
+    # Start the tmux server in its own systemd scope. Otherwise it is born in
+    # the caller's cgroup (StatusBoard's Start button, a cron, an ssh login)
+    # and every agent dies with it the next time that unit restarts. That
+    # took the whole fleet down on 2026-11-08 when StatusBoard was redeployed.
+    local rt="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+    if command -v systemd-run >/dev/null 2>&1 && [ -S "$rt/bus" ]; then
+        XDG_RUNTIME_DIR="$rt" systemd-run --user --scope --quiet --collect \
+            --description="Agent fleet tmux server" -p OOMPolicy=continue \
+            tmux new-session -d -s "$TMUX_SESSION" -n "manager" && return 0
     fi
+    tmux new-session -d -s "$TMUX_SESSION" -n "manager"
 }
 
 start_agent() {
