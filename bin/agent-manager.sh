@@ -1,5 +1,5 @@
 #!/bin/bash
-# Agent Manager — start, stop, and manage Claude Code agents in tmux sessions
+# Agent Manager — start, stop, and manage Claude Code and agy agents in tmux sessions
 # Usage: agent-manager.sh <command> [agent_name]
 # Commands: start, stop, restart, status, start-all, stop-all, list
 
@@ -20,6 +20,18 @@ get_agent_name() {
 is_claude_agent() {
     local dir="$1"
     "$FLEET_PYTHON" -c "import json,sys; c=json.load(open('$dir/config.json')); sys.exit(0 if c.get('platform','claude') == 'claude' and not c.get('hidden') else 1)" 2>/dev/null
+}
+
+get_agent_platform() {
+    local dir="$1"
+    "$FLEET_PYTHON" -c "import json; print(json.load(open('$dir/config.json')).get('platform','claude'))" 2>/dev/null
+}
+
+# Agents this script can launch: Claude Code, and the Antigravity CLI (agy).
+# Anything else (a grok-bot behind its broker) has no pane and is left alone.
+is_managed_agent() {
+    local dir="$1"
+    "$FLEET_PYTHON" -c "import json,sys; c=json.load(open('$dir/config.json')); sys.exit(0 if c.get('platform','claude') in ('claude','agy') and not c.get('hidden') else 1)" 2>/dev/null
 }
 
 get_agent_workdir() {
@@ -69,6 +81,11 @@ start_agent() {
     if [ ! -f "$agent_dir/config.json" ]; then
         echo "Agent '$name' not found in $AGENTS_DIR"
         return 1
+    fi
+
+    if [ "$(get_agent_platform "$agent_dir")" = "agy" ]; then
+        start_agy_agent "$agent_dir"
+        return
     fi
 
     if ! is_claude_agent "$agent_dir"; then
@@ -296,6 +313,37 @@ print(m.group(1) if m else '')
     echo "Agent '$alias_name' started in tmux session '$TMUX_SESSION'"
 }
 
+# An agy agent: its own tmux window, launched from agy_args in its config.
+# agy has no channel inbound (the mention watcher types into the pane) and no
+# startup_commands, so there is no ready-prompt poller here. Its Discord
+# outbound is the plugin run as an agy MCP server, configured in agy itself.
+start_agy_agent() {
+    local agent_dir="$1"
+    local alias_name workdir args extra_env
+    alias_name=$(get_agent_name "$agent_dir")
+    workdir=$(get_agent_workdir "$agent_dir")
+    args=$("$FLEET_PYTHON" -c "import json, shlex; print(' '.join(shlex.quote(a) for a in json.load(open('$agent_dir/config.json')).get('agy_args', [])))")
+    extra_env=$(get_agent_env "$agent_dir")
+
+    ensure_tmux_session
+
+    if tmux list-windows -t "$TMUX_SESSION" -F '#{window_name}' 2>/dev/null | grep -q "^${alias_name}$"; then
+        echo "Agent '$alias_name' is already running"
+        return 0
+    fi
+
+    local env_prefix="FORCE_COLOR=1 "
+    [ -n "$FLEET_TZ" ] && env_prefix="TZ=$FLEET_TZ $env_prefix"
+    [ -n "$extra_env" ] && env_prefix="$extra_env $env_prefix"
+
+    echo "Starting agy agent '$alias_name' in tmux..."
+    tmux new-window -t "$TMUX_SESSION" -n "$alias_name"
+    # Pick up the last conversation. If there is none to continue, fall back
+    # to a fresh one rather than leave a dead window at a shell prompt.
+    tmux send-keys -t "$TMUX_SESSION:$alias_name" "cd $workdir && ${env_prefix}agy --continue $args || ${env_prefix}agy $args" Enter
+    echo "Agent '$alias_name' started in tmux session '$TMUX_SESSION'"
+}
+
 stop_agent() {
     local name="$1"
     local agent_dir="$AGENTS_DIR/$name"
@@ -313,12 +361,16 @@ stop_agent() {
         # Send Ctrl-C to interrupt any running task
         tmux send-keys -t "$TMUX_SESSION:$alias_name" C-c
         sleep 2
-        # Send /exit
-        tmux send-keys -t "$TMUX_SESSION:$alias_name" "/exit" Enter 2>/dev/null
-        sleep 2
-        # Confirm "Exit anyway" if background tasks prompt appears
-        tmux send-keys -t "$TMUX_SESSION:$alias_name" Enter 2>/dev/null
-        sleep 1
+        # /exit is a Claude Code command; typed into agy it would be a prompt
+        # to the model. agy goes down with the window.
+        if [ "$(get_agent_platform "$agent_dir")" != "agy" ]; then
+            # Send /exit
+            tmux send-keys -t "$TMUX_SESSION:$alias_name" "/exit" Enter 2>/dev/null
+            sleep 2
+            # Confirm "Exit anyway" if background tasks prompt appears
+            tmux send-keys -t "$TMUX_SESSION:$alias_name" Enter 2>/dev/null
+            sleep 1
+        fi
         # Force kill the window as fallback
         tmux kill-window -t "$TMUX_SESSION:$alias_name" 2>/dev/null
         echo "Agent '$alias_name' stopped"
@@ -342,7 +394,7 @@ status_all() {
     for agent_dir in $(get_agent_dirs); do
         local name
         name=$(get_agent_name "$agent_dir")
-        if ! is_claude_agent "$agent_dir"; then
+        if ! is_managed_agent "$agent_dir"; then
             echo "  $name: EXTERNAL (not managed here)"
             continue
         fi
@@ -360,7 +412,7 @@ start_all() {
         name=$(basename "$agent_dir")
         # Skip hidden / non-managed agents (e.g. temp — placeholder for manual experimentation).
         # They can still be launched explicitly with `start <name>`.
-        if ! is_claude_agent "$agent_dir"; then
+        if ! is_managed_agent "$agent_dir"; then
             echo "  Skipping '$name' (hidden / not auto-started)"
             continue
         fi
