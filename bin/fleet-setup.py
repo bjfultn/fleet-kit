@@ -292,6 +292,36 @@ def render(template: Path, values: dict[str, str]) -> str:
     return text
 
 
+def json_escape(val: object) -> str:
+    """The inside of a JSON string literal for val, without the quotes.
+
+    Non-ASCII is kept as-is (the files are UTF-8), so a name or personality
+    with an accent or a dash stays readable in the config.
+    """
+    return json.dumps(str(val), ensure_ascii=False)[1:-1]
+
+
+def render_json(template: Path, values: dict[str, str],
+                raw: frozenset[str] = frozenset()) -> str:
+    """render() for a .json template, with every value escaped for the string
+    slot it fills.
+
+    Plain replacement let a personality like `Calm, says "no" often` through
+    unescaped: setup wrote a config.json that was not JSON, said it succeeded,
+    and the watcher died at its next start with "cannot read config.json".
+    Keys in raw are already JSON (lists, objects) and go in untouched. The
+    result is parsed before it is returned, so whatever slips past the
+    escaping fails here, at setup, and not at boot.
+    """
+    text = render(template, {
+        k: (v if k in raw else json_escape(v)) for k, v in values.items()})
+    try:
+        json.loads(text)
+    except json.JSONDecodeError as e:
+        die(f"{template.name}: rendered file is not valid JSON ({e})")
+    return text
+
+
 def build_access(agent: dict, all_agents: list[dict], owner_id: str,
                  general_id: str) -> str:
     """Who may wake this agent.
@@ -309,11 +339,11 @@ def build_access(agent: dict, all_agents: list[dict], owner_id: str,
         groups.setdefault(
             p["private_channel_id"], {"requireMention": True, "allowFrom": []})
 
-    return render(TEMPLATES / "agent" / "access.json.tmpl", {
+    return render_json(TEMPLATES / "agent" / "access.json.tmpl", {
         "OWNER_USER_ID": owner_id,
         "PEER_BOT_IDS": ", ".join(json.dumps(p["bot_id"]) for p in peers),
         "GROUPS": json.dumps(groups, indent=2).replace("\n", "\n  ").rstrip(),
-    })
+    }, raw=frozenset({"PEER_BOT_IDS", "GROUPS"}))
 
 
 def build_roster(agent: dict, all_agents: list[dict]) -> str:
@@ -450,7 +480,7 @@ def main() -> int:
             "STATE_DIR": str(state_dir),
         }
 
-        writer.write(adir / "config.json", render(
+        writer.write(adir / "config.json", render_json(
             TEMPLATES / "agent" / "config.json.tmpl",
             {**common,
              "MODEL": a.get("model", "claude-sonnet-5"),
