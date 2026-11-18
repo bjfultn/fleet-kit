@@ -530,16 +530,48 @@ def extract_mentioned_agents(message: dict) -> set[str]:
     return targets
 
 
+DISCORD_EPOCH_MS = 1420070400000
+
+
+def snowflake_at(epoch_seconds: float) -> str:
+    """The smallest message id Discord could assign at that moment.
+
+    Snowflakes carry their creation time in the high bits, so as an after=
+    cursor this asks for "messages sent after this time" without knowing any
+    real message id.
+    """
+    return str(max(0, int(epoch_seconds * 1000) - DISCORD_EPOCH_MS) << 22)
+
+
 def seed_last_seen():
-    """On startup, seed last_seen with current latest message IDs so we don't
-    process old messages."""
+    """On startup, give every channel a position so old messages are skipped.
+
+    The newest real message id is the best position. When a channel cannot be
+    read (network not up yet at boot, a 429, a 5xx), the watcher's own start
+    time stands in for it. Leaving the channel unseeded is what this used to
+    do, and the first poll then fetched the newest ten messages with no after=
+    and treated them all as new: old mentions woke agents again and old
+    messages for a Grok Bot agent went to its webhook a second time.
+
+    The start-time position is taken before the first request, so a message
+    sent while seeding is still delivered. An empty channel gets the same
+    position, which delivers its first message exactly as before. The cost is
+    clock skew: a host clock N seconds fast skips messages from the first N
+    seconds after start, N seconds slow replays the last N before it.
+    """
     log("Seeding channel positions...")
+    started = snowflake_at(time.time())
     for channel_id in CHANNELS:
-        messages = fetch_messages(channel_id)
-        if messages:
+        messages = discord_get(f"/channels/{channel_id}/messages?limit=1")
+        if isinstance(messages, list) and messages:
             # Messages come newest-first from Discord
             last_seen[channel_id] = messages[0]["id"]
             log(f"  #{channel_id}: last_seen={messages[0]['id']}")
+        else:
+            last_seen[channel_id] = started
+            if not isinstance(messages, list):
+                log(f"  #{channel_id}: could not read its position; "
+                    "delivering only messages sent after the watcher started")
         time.sleep(0.5)  # Be gentle on rate limits
 
 
