@@ -131,7 +131,7 @@ Fleet-wide settings the scripts read at startup.
 | `log_dir` | `$FLEET_ROOT/logs` | |
 | `python` | `python3` | Must be 3.10+ for the watcher. |
 | `watcher_token_file` | first agent's `.env` | Any bot in the server can poll. |
-| `defaults.auto_compact_window` | `200000` | |
+| `defaults.auto_compact_window` | `200000` | Fleet default. An agent's `config.json` key `compact_window` (integer, 100000 to 1000000) overrides it for that agent; anything else falls back to the default. Takes effect on the agent's next restart. |
 
 ## What is deliberately not here
 

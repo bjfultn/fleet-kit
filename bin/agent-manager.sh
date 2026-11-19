@@ -58,6 +58,19 @@ get_startup_commands() {
     "$FLEET_PYTHON" -c "import json; cmds=json.load(open('$dir/config.json')).get('startup_commands',[]); print('\n'.join(cmds))" 2>/dev/null
 }
 
+get_agent_compact_window() {
+    local dir="$1"
+    "$FLEET_PYTHON" - "$dir/config.json" "$FLEET_COMPACT_WINDOW" <<'PYEOF' 2>/dev/null || echo "$FLEET_COMPACT_WINDOW"
+import json, sys
+default = sys.argv[2]
+try:
+    v = json.load(open(sys.argv[1])).get("compact_window")
+except Exception:
+    v = None
+print(v if isinstance(v, int) and not isinstance(v, bool) and 100000 <= v <= 1000000 else default)
+PYEOF
+}
+
 get_agent_env() {
     # Returns any extra env vars from config.json "env" field as "KEY=VALUE KEY2=VALUE2 ..."
     local dir="$1"
@@ -180,7 +193,12 @@ print(m.group(1) if m else '')
     esac
     local tz_prefix=""
     [ -n "$FLEET_TZ" ] && tz_prefix="TZ=$FLEET_TZ "
-    local common_env="FORCE_COLOR=1 CLAUDE_CODE_AUTO_COMPACT_WINDOW=${FLEET_COMPACT_WINDOW} ${advisor_prefix}AGENT_EFFORT=${agent_effort:-medium} "
+    # Auto-compact window: the agent's config.json "compact_window" (tokens) overrides the fleet
+    # default (fleet.json defaults.auto_compact_window). Out of range (100k..1M) or not an integer
+    # falls back to the default, so a typo can't take an agent down.
+    local compact_window
+    compact_window=$(get_agent_compact_window "$agent_dir")
+    local common_env="FORCE_COLOR=1 CLAUDE_CODE_AUTO_COMPACT_WINDOW=${compact_window} ${advisor_prefix}AGENT_EFFORT=${agent_effort:-medium} "
     local env_prefix="${tz_prefix}${common_env}"
     if [ -n "$state_dir" ]; then
         # Expand ~ to $HOME
