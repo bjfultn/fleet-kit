@@ -367,7 +367,21 @@ start_agy_agent() {
     tmux new-window -t "$TMUX_SESSION" -n "$alias_name"
     # Pick up the last conversation. If there is none to continue, fall back
     # to a fresh one rather than leave a dead window at a shell prompt.
-    tmux send-keys -t "$TMUX_SESSION:$alias_name" "cd $workdir && ${env_prefix}agy --continue $args || ${env_prefix}agy $args" Enter
+    #
+    # Resume by id, not `agy --continue`: on the 2026-11-21 reboot --continue
+    # chose an older conversation (stuck on API 400s since 11-12) over the one
+    # Aragon had been working in all week, so every message bounced. The
+    # conversation written most recently (db or its WAL) is the live one.
+    # agy keeps conversations per OS user, so this assumes one agy agent per
+    # user, which holds on poma (Aragon only).
+    local resume="--continue" conv
+    conv=$(ls -t "$HOME"/.gemini/antigravity-cli/conversations/*.db \
+                 "$HOME"/.gemini/antigravity-cli/conversations/*.db-wal 2>/dev/null | head -1)
+    if [ -n "$conv" ]; then
+        conv=$(basename "$conv"); conv=${conv%%.db*}
+        resume="--conversation $conv"
+    fi
+    tmux send-keys -t "$TMUX_SESSION:$alias_name" "cd $workdir && ${env_prefix}agy $resume $args || ${env_prefix}agy $args" Enter
     echo "Agent '$alias_name' started in tmux session '$TMUX_SESSION'"
 }
 
